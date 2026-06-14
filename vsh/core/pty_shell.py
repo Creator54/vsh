@@ -15,8 +15,8 @@ from vsh.core.voice_input import VoiceInputThread
 from vsh.core.provider import Thinker, ThinkerResponse
 
 # ANSI escape sequences for cursor control and terminal title
-CURSOR_DEFAULT = b"\033]112\033\\\033[2 q\033]2;vsh\033\\"
-CURSOR_RED_BLINK = b"\033]12;rgb:ff/00/ff\033\\\033[1 q\033]2;vsh [LISTENING]\033\\"
+CURSOR_DEFAULT = b"\033]112\a\033[0 q\033]0;vsh\a"
+CURSOR_RED_BLINK = b"\033]12;#ff00ff\a\033[1 q\033]0;vsh [LISTENING]\a"
 
 class PtyShell:
     def __init__(self, config: VshConfig, thinker: Thinker = None):
@@ -68,17 +68,18 @@ class PtyShell:
             sys.stdout.buffer.write(CURSOR_DEFAULT)
         sys.stdout.buffer.flush()
 
-    def _notify(self, msg: str):
+    def _notify(self, msg: str, color="36"):
         """Print a notification on a new line, then restore the cursor."""
         # \r to go to start, \n for new line, print msg, \n to move down
         # Actually in raw mode we need explicit \r\n
-        sys.stderr.buffer.write(f"\r\n\033[36m[vsh]\033[0m {msg}\r\n".encode())
+        sys.stderr.buffer.write(f"\r\n\033[{color}m[vsh]\033[0m {msg}\r\n".encode())
         sys.stderr.buffer.flush()
 
     def _toggle_listening(self):
         self.is_listening = self.voice_thread.toggle_listening()
         if self.is_listening:
-            self._notify("Listening...")
+            self._notify("LISTENING", color="1;35") # Bold Magenta
+            sys.stdout.buffer.write(b"\a") # Audible beep
         else:
             self._notify("Stopped")
         self._update_cursor()
