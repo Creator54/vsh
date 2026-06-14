@@ -43,20 +43,21 @@ class MicStream:
     """Microphone audio stream using PyAudio."""
     def __init__(self, rate=16000, chunk=1024, device_index=None):
         self.rate, self.chunk, self.device_index = rate, chunk, device_index
-        self._audio = pyaudio.PyAudio()
+        with no_stderr(): self._audio = pyaudio.PyAudio()
         self._queue = queue.Queue()
         self._stream = None
 
     def __enter__(self):
-        self._stream = self._audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self.rate,
-            input=True,
-            input_device_index=self.device_index,
-            frames_per_buffer=self.chunk,
-            stream_callback=self._callback,
-        )
+        with no_stderr():
+            self._stream = self._audio.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self.rate,
+                input=True,
+                input_device_index=self.device_index,
+                frames_per_buffer=self.chunk,
+                stream_callback=self._callback,
+            )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

@@ -20,10 +20,9 @@ def setup(v: bool, i: int = None, o: int = None, vt: int = 800, vs: int = 20, m:
 class LocalSpeech:
     def __init__(self, stt, tts): self.stt, self.tts = stt, tts
     def listen(self, on_phrase=None):
-        with no_stderr():
-            sys.stderr.write("[vsh] LISTENING\n"); sys.stderr.flush()
-            with MicStream(device_index=STATE["in"]) as s:
-                return self.stt.transcribe_stream(s.live_gen(threshold=STATE["vad_thr"], silence_limit=STATE["vad_sil"], verbose=STATE["v"]), on_phrase=on_phrase)
+        sys.stderr.write("[vsh] LISTENING\n"); sys.stderr.flush()
+        with MicStream(device_index=STATE["in"]) as s:
+            return self.stt.transcribe_stream(s.live_gen(threshold=STATE["vad_thr"], silence_limit=STATE["vad_sil"], verbose=STATE["v"]), on_phrase=on_phrase)
     def say(self, text):
         if text:
             sys.stderr.write("[vsh] SPEAKING\n"); sys.stderr.flush()
@@ -47,9 +46,12 @@ def list_devices():
 @app.command()
 def stt(file: str=typer.Option(None, "--file", "-f"), i: int=typer.Option(None, "--in"), m: str=typer.Option(None, "--model"), rate: int=16000, vt: int=400):
     """Audio -> Text"""
-    setup(STATE["v"], i, None, vt, 20, m); e = LocalSpeech(VoskSTTProvider(m), None)
+    setup(STATE["v"], i, None, vt, 20, m)
+    sys.stderr.write("[vsh] VSH STT active (LOCAL VERSION)\n")
+    with no_stderr(): e = LocalSpeech(VoskSTTProvider(m), None)
+    
     if file == "-": 
-        with no_stderr(): res = e.stt.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
+        res = e.stt.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
     elif file: 
         with wave.open(file, 'rb') as f: sig = AudioSignal(f.readframes(f.getnframes()), f.getframerate(), f.getsampwidth())
         res = e.stt.transcribe_stream([sig.to_rate(16000).data])
@@ -61,7 +63,8 @@ def tts(text: str=typer.Argument(None), o: int=typer.Option(None, "--out"), save
     """Text -> Audio"""
     setup(STATE["v"], None, o); text = text or (not sys.stdin.isatty() and sys.stdin.read().strip())
     if not text: raise typer.Exit(logger.error("No input") or 1)
-    e = LocalSpeech(None, SupertonicTTSProvider(voice=voice))
+    sys.stderr.write("[vsh] VSH TTS active (LOCAL VERSION)\n")
+    with no_stderr(): e = LocalSpeech(None, SupertonicTTSProvider(voice=voice))
     wav = e.tts.synthesize(text)
     data = (wav * 32767 * 0.9).astype("int16").tobytes()
     sig = AudioSignal(data, 44100)
