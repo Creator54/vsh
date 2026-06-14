@@ -16,7 +16,7 @@ from vsh.core.provider import Thinker, ThinkerResponse
 
 # ANSI escape sequences for cursor control and terminal title
 CURSOR_DEFAULT = b"\033]112\033\\\033[2 q\033]2;vsh\033\\"
-CURSOR_RED_BLINK = b"\033]12;red\033\\\033[1 q\033]2;vsh [LISTENING]\033\\"
+CURSOR_RED_BLINK = b"\033]12;rgb:ff/00/ff\033\\\033[1 q\033]2;vsh [LISTENING]\033\\"
 
 class PtyShell:
     def __init__(self, config: VshConfig, thinker: Thinker = None):
