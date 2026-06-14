@@ -71,7 +71,7 @@ class MicStream:
         self._queue.put(in_data)
         return None, pyaudio.paContinue
 
-    def live_gen(self, silence_limit=15, timeout=50, threshold=400, verbose=False):
+    def live_gen(self, silence_limit=15, timeout=50, threshold=1000, verbose=False):
         """Generator that yields chunks until silence is detected."""
         silent_chunks = 0
         has_speech = False
@@ -82,8 +82,8 @@ class MicStream:
             
             energy = audioop.rms(chunk, 2)
             if verbose:
-                # VU meter: 1 bar per 100 RMS, up to 3000
-                bars = min(30, energy // 100)
+                # VU meter: 1 bar per 200 RMS, up to 6000
+                bars = min(30, energy // 200)
                 meter = "|" + "#" * bars + " " * (30 - bars) + "|"
                 sys.stderr.write(f"\r{meter} {energy:5} (thr:{threshold})")
                 sys.stderr.flush()

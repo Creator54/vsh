@@ -6,7 +6,7 @@ from vsh.core.audio import AudioSignal, MicStream
 from vsh.providers.vosk import VoskSTTProvider
 from vsh.providers.supertonic import SupertonicTTSProvider
 
-STATE = {"v": False, "in": None, "out": None, "vad_thr": 800, "vad_sil": 20, "model": "vosk-model-en-in-0.5"}
+STATE = {"v": False, "in": None, "out": None, "vad_thr": 1000, "vad_sil": 20, "model": "vosk-model-en-in-0.5"}
 
 @contextlib.contextmanager
 def no_stderr():
@@ -44,7 +44,7 @@ def list_devices():
     p.terminate()
 
 @app.command()
-def stt(file: str=typer.Option(None, "--file", "-f"), i: int=typer.Option(None, "--in"), m: str=typer.Option(None, "--model"), rate: int=16000, vt: int=400):
+def stt(file: str=typer.Option(None, "--file", "-f"), i: int=typer.Option(None, "--in"), m: str=typer.Option(None, "--model"), rate: int=16000, vt: int=1000):
     """Audio -> Text"""
     setup(STATE["v"], i, None, vt, 20, m)
     sys.stderr.write("[vsh] VSH STT active (LOCAL VERSION)\n")

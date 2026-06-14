@@ -43,16 +43,21 @@ class VoskSTTProvider(STTProvider):
 
     def transcribe_stream(self, audio_stream: Iterator[bytes], on_phrase=None, rate: int = 16000) -> str:
         rec, res, st = KaldiRecognizer(self.model, 16000), [], None
+        chunk_count = 0
         for chunk in audio_stream:
+            chunk_count += 1
             if rate != 16000: chunk, st = audioop.ratecv(chunk, 2, 1, rate, 16000, st)
             if rec.AcceptWaveform(chunk):
                 t = json.loads(rec.Result()).get("text", "")
                 if t:
+                    logger.debug(f"Vosk result: {t}")
                     res.append(t)
                     if on_phrase: on_phrase(t)
         
+        logger.debug(f"Vosk stream finished. Total chunks: {chunk_count}")
         f = json.loads(rec.FinalResult()).get("text", "")
         if f:
+            logger.debug(f"Vosk final: {f}")
             res.append(f)
             if on_phrase: on_phrase(f)
         return " ".join(filter(None, res))
