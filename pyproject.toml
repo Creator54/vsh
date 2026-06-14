@@ -1,7 +1,7 @@
 [project]
 name = "vsh"
 version = "0.1.0"
-description = "Voice Shell - Orchestrating and hot-swapping STT and TTS models"
+description = "vsh: Voice Shell - Local Text <-> Audio interoperability engine"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,7 +11,6 @@ dependencies = [
     "vosk>=0.3.45",
     "loguru>=0.7.2",
     "numpy",
-    "rich",
 ]
 
 [build-system]
