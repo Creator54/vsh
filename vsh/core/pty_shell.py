@@ -114,6 +114,7 @@ class PtyShell:
             
             # Setup raw mode
             self._setup_terminal()
+            self._notify("VSH active. Press Ctrl+\\ to toggle voice.")
             
             try:
                 self._io_loop()
