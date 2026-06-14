@@ -8,6 +8,7 @@ from loguru import logger
 from pathlib import Path
 import json
 import os
+import sys
 import shutil
 import urllib.request
 import ssl
