@@ -79,12 +79,10 @@ class PtyShell:
 
     def _toggle_listening(self):
         self.is_listening = self.voice_thread.toggle_listening()
-        if self.verbose: logger.info(f"Toggle trigger: listening={self.is_listening}")
-        if self.is_listening:
-            self._notify("LISTENING", color="1;35") # Bold Magenta
-            sys.stdout.buffer.write(b"\a") # Audible beep
-        else:
-            self._notify("Stopped")
+        m = "LISTENING" if self.is_listening else "STOPPED"
+        c = "1;35" if self.is_listening else "36"
+        self._notify(m, color=c)
+        if self.is_listening: sys.stdout.buffer.write(b"\a")
         self._update_cursor()
 
     def _inject_command(self, cmd: str):
@@ -174,20 +172,19 @@ class PtyShell:
             if sys.stdin.fileno() in ready_r:
                 try:
                     data = os.read(sys.stdin.fileno(), 1024)
-                except OSError:
-                    break
-                    
-                if not data:
-                    break # EOF
+                except OSError: break
+                if not data: break
                 
-                # Check for Ctrl+\ (0x1c)
-                if b'\x1c' in data:
-                    if self.verbose: logger.info("Detected Ctrl+\\ trigger")
-                    data = data.replace(b'\x1c', b''); self._toggle_listening()
+                if self.verbose:
+                    self._notify(f"RAW INPUT: {data.hex(' ')}", color="33")
+
+                # Check for Ctrl+G (0x07) or Ctrl+\ (0x1c)
+                if b'\x07' in data or b'\x1c' in data:
+                    data = data.replace(b'\x07', b'').replace(b'\x1c', b'')
+                    self._toggle_listening()
                 
                 # Forward everything else to PTY
-                if data:
-                    os.write(self.master_fd, data)
+                if data: os.write(self.master_fd, data)
             
             # 3. Process PTY output
             if self.master_fd in ready_r:
