@@ -178,9 +178,11 @@ class PtyShell:
                 if self.verbose:
                     self._notify(f"RAW INPUT: {data.hex(' ')}", color="33")
 
-                # Check for Ctrl+G (0x07) or Ctrl+\ (0x1c)
-                if b'\x07' in data or b'\x1c' in data:
-                    data = data.replace(b'\x07', b'').replace(b'\x1c', b'')
+                # Triggers: standard bytes or Kitty Protocol sequences
+                # 1c=Ctrl+\, 07=Ctrl+G, CSI 92;5u=Kitty Ctrl+\, CSI 103;5u=Kitty Ctrl+G
+                triggers = [b'\x1c', b'\x07', b'\x1b[92;5u', b'\x1b[103;5u']
+                if any(t in data for t in triggers):
+                    for t in triggers: data = data.replace(t, b'')
                     self._toggle_listening()
                 
                 # Forward everything else to PTY
