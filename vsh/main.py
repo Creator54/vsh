@@ -113,7 +113,7 @@ def shell(inner_shell: str=typer.Option(None, "--shell", "-s", help="Override in
     elif config.llm.provider:
         logger.warning(f"Unknown LLM provider: {config.llm.provider}")
         
-    pty_shell = PtyShell(config, thinker)
+    pty_shell = PtyShell(config, thinker, verbose=STATE["v"])
     
     # If voice_on_start is true, we simulate the first toggle
     if config.shell.voice_on_start:

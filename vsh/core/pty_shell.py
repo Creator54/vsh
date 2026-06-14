@@ -19,9 +19,10 @@ CURSOR_DEFAULT = b"\033]112\a\033[0 q\033]0;vsh\a"
 CURSOR_RED_BLINK = b"\033]12;#ff00ff\a\033[1 q\033]0;vsh [LISTENING]\a"
 
 class PtyShell:
-    def __init__(self, config: VshConfig, thinker: Thinker = None):
+    def __init__(self, config: VshConfig, thinker: Thinker = None, verbose: bool = False):
         self.config = config
         self.thinker = thinker
+        self.verbose = verbose
         
         # Determine which shell to run
         self.inner_shell = config.shell.inner_shell or os.environ.get("SHELL", "/bin/bash")
@@ -77,6 +78,7 @@ class PtyShell:
 
     def _toggle_listening(self):
         self.is_listening = self.voice_thread.toggle_listening()
+        if self.verbose: logger.info(f"Toggle trigger: listening={self.is_listening}")
         if self.is_listening:
             self._notify("LISTENING", color="1;35") # Bold Magenta
             sys.stdout.buffer.write(b"\a") # Audible beep
@@ -142,6 +144,7 @@ class PtyShell:
             while not self.stt_queue.empty():
                 transcript = self.stt_queue.get()
                 if transcript:
+                    if self.verbose: logger.info(f"STT Transcript: {transcript}")
                     if self.thinker:
                         # Route through LLM
                         response = self.thinker.ask(transcript)
@@ -170,7 +173,9 @@ class PtyShell:
                     break # EOF
                 
                 # Check for Ctrl+\ (0x1c)
-                if b'\x1c' in data: data = data.replace(b'\x1c', b''); self._toggle_listening()
+                if b'\x1c' in data:
+                    if self.verbose: logger.info("Detected Ctrl+\\ trigger")
+                    data = data.replace(b'\x1c', b''); self._toggle_listening()
                 
                 # Forward everything else to PTY
                 if data:
