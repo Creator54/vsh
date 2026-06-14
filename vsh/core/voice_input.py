@@ -58,7 +58,8 @@ class VoiceInputThread(threading.Thread):
                 break
 
             try:
-                with MicStream() as stream:
+                from vsh.core.audio import no_stderr
+                with no_stderr(), MicStream() as stream:
                     # Inner loop for the active microphone session
                     while self.is_listening and not self.should_exit:
                         # stream.live_gen blocks until VAD detects speech, 
