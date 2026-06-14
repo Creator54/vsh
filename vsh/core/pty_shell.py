@@ -32,8 +32,36 @@ class PtyShell:
         self.master_fd = None
         self.slave_fd = None
         self.stt_queue = queue.Queue()
+        self.stt_queue = queue.Queue()
         self.tts_queue = queue.Queue()
         self.voice_thread = None
+
+    def _pipeline_worker(self):
+        """Background worker to handle thinking and coordination without blocking the shell."""
+        while True:
+            transcript = self.stt_queue.get()
+            if transcript is None: break
+            
+            if self.verbose: logger.info(f"Processing: {transcript}")
+            
+            if self.thinker:
+                try:
+                    # This call might be slow (LLM), but it's in a background thread
+                    response = self.thinker.ask(transcript)
+                    if isinstance(response, str):
+                        self._inject_command(response)
+                    else:
+                        if response.command: self._inject_command(response.command)
+                        if response.speech:
+                            self._notify(f"VSH: {response.speech}")
+                            if self.tts_provider: self.tts_queue.put(response.speech)
+                except Exception as e:
+                    logger.error(f"Thinker Error: {e}")
+            else:
+                # Direct injection
+                self._inject_command(transcript)
+            
+            self.stt_queue.task_done()
 
     def _tts_worker(self):
         """Background worker to handle TTS synthesis and playback without blocking the shell."""
@@ -142,7 +170,10 @@ class PtyShell:
             )
             self.voice_thread.start()
 
-            # Start background TTS thread
+            # The pipeline worker handles LLM/Thinking
+            self.pipeline_thread = threading.Thread(target=self._pipeline_worker, daemon=True)
+            self.pipeline_thread.start()
+
             if self.tts_provider:
                 self.tts_worker = threading.Thread(target=self._tts_worker, daemon=True)
                 self.tts_worker.start()
@@ -158,45 +189,24 @@ class PtyShell:
                 self._restore_terminal()
                 self.voice_thread.stop()
                 self.voice_thread.join(timeout=2.0)
+                self.stt_queue.put(None) # Signal pipeline to stop
                 if self.tts_provider:
                     self.tts_queue.put(None)
                 os.waitpid(pid, 0)
 
     def _io_loop(self):
-        """The main select() loop that multiplexes stdin, PTY, and STT results."""
+        """The main select() loop that multiplexes stdin and PTY. Non-blocking."""
         while True:
             # Read inputs: stdin and the PTY master
             r_fds = [sys.stdin.fileno(), self.master_fd]
             
             try:
-                # Wait for I/O with a short timeout so we can check the STT queue
-                ready_r, _, _ = select.select(r_fds, [], [], 0.1)
+                # Main multiplexer: No thinking or audio work here!
+                ready_r, _, _ = select.select(r_fds, [], [])
             except InterruptedError:
                 continue
             
-            # 1. Process STT queue
-            while not self.stt_queue.empty():
-                transcript = self.stt_queue.get()
-                if transcript:
-                    if self.verbose: logger.info(f"STT Transcript: {transcript}")
-                    if self.thinker:
-                        # Route through LLM
-                        response = self.thinker.ask(transcript)
-                        if isinstance(response, str):
-                            self._inject_command(response)
-                        else:
-                            if response.command:
-                                self._inject_command(response.command)
-                            if response.speech:
-                                # Send to TTS queue for background playback
-                                self._notify(f"VSH: {response.speech}")
-                                if self.tts_provider:
-                                    self.tts_queue.put(response.speech)
-                    else:
-                        # Direct injection
-                        self._inject_command(transcript)
-            
-            # 2. Process keyboard input
+            # 1. Process keyboard input
             if sys.stdin.fileno() in ready_r:
                 try:
                     data = os.read(sys.stdin.fileno(), 1024)
@@ -213,7 +223,7 @@ class PtyShell:
                 # Forward everything else to PTY
                 if data: os.write(self.master_fd, data)
             
-            # 3. Process PTY output
+            # 2. Process PTY output
             if self.master_fd in ready_r:
                 try:
                     data = os.read(self.master_fd, 10240)
