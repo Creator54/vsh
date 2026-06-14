@@ -20,10 +20,10 @@ def setup(v: bool, i: int = None, o: int = None, vt: int = 800, vs: int = 20, m:
 class LocalSpeech:
     def __init__(self, stt, tts): self.stt, self.tts = stt, tts
     def listen(self, on_phrase=None):
-        sys.stderr.write("[vsh] LISTENING\n"); sys.stderr.flush()
-        with MicStream() as s:
-            # VoskSTTProvider.transcribe_stream takes an iterator
-            return self.stt.transcribe_stream(s.live_gen(), on_phrase=on_phrase)
+        with no_stderr():
+            sys.stderr.write("[vsh] LISTENING\n"); sys.stderr.flush()
+            with MicStream(device_index=STATE["in"]) as s:
+                return self.stt.transcribe_stream(s.live_gen(threshold=STATE["vad_thr"], silence_limit=STATE["vad_sil"], verbose=STATE["v"]), on_phrase=on_phrase)
     def say(self, text):
         if text:
             sys.stderr.write("[vsh] SPEAKING\n"); sys.stderr.flush()
@@ -45,10 +45,11 @@ def list_devices():
     p.terminate()
 
 @app.command()
-def stt(file: str=typer.Option(None, "--file", "-f"), i: int=typer.Option(None, "--in"), m: str=typer.Option(None, "--model"), rate: int=16000):
+def stt(file: str=typer.Option(None, "--file", "-f"), i: int=typer.Option(None, "--in"), m: str=typer.Option(None, "--model"), rate: int=16000, vt: int=400):
     """Audio -> Text"""
-    setup(STATE["v"], i, None, 800, 20, m); e = LocalSpeech(VoskSTTProvider(m), None)
-    if file == "-": res = e.stt.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
+    setup(STATE["v"], i, None, vt, 20, m); e = LocalSpeech(VoskSTTProvider(m), None)
+    if file == "-": 
+        with no_stderr(): res = e.stt.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
     elif file: 
         with wave.open(file, 'rb') as f: sig = AudioSignal(f.readframes(f.getnframes()), f.getframerate(), f.getsampwidth())
         res = e.stt.transcribe_stream([sig.to_rate(16000).data])
