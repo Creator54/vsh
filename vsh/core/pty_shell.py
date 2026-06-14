@@ -19,10 +19,11 @@ CURSOR_DEFAULT = b"\033]112\a\033[0 q\033]0;vsh\a"
 CURSOR_RED_BLINK = b"\033]12;#ff00ff\a\033[1 q\033]0;vsh [LISTENING]\a"
 
 class PtyShell:
-    def __init__(self, config: VshConfig, thinker: Thinker = None, verbose: bool = False):
+    def __init__(self, config: VshConfig, thinker: Thinker = None, verbose: bool = False, tts_provider=None):
         self.config = config
         self.thinker = thinker
         self.verbose = verbose
+        self.tts_provider = tts_provider
         
         # Determine which shell to run
         self.inner_shell = config.shell.inner_shell or os.environ.get("SHELL", "/bin/bash")
@@ -112,7 +113,7 @@ class PtyShell:
             self._handle_sigwinch(None, None)
             
             # Start background STT thread
-            self.voice_thread = VoiceInputThread(self.stt_queue)
+            self.voice_thread = VoiceInputThread(self.stt_queue, provider_name=self.config.stt.provider)
             self.voice_thread.start()
             
             # Setup raw mode
@@ -154,10 +155,17 @@ class PtyShell:
                             if response.command:
                                 self._inject_command(response.command)
                             if response.speech:
-                                # Play TTS in background or block?
-                                # For now we notify and let the TTS provider handle it
+                                # Play TTS
                                 self._notify(f"VSH: {response.speech}")
-                                # TODO: wire up actual TTS here when we add TTS to the shell
+                                if self.tts_provider:
+                                    try:
+                                        wav = self.tts_provider.synthesize(response.speech)
+                                        # Convert to int16 bytes
+                                        data = (wav * 32767 * 0.9).astype("int16").tobytes()
+                                        from vsh.core.audio import AudioSignal
+                                        AudioSignal(data, 44100).play()
+                                    except Exception as e:
+                                        logger.error(f"TTS Error: {e}")
                     else:
                         # Direct injection
                         self._inject_command(transcript)

@@ -3,13 +3,14 @@ import queue
 import time
 from loguru import logger
 from vsh.core.audio import MicStream
-from vsh.providers.vosk import VoskSTTProvider
+from vsh.providers import STT_PROVIDERS
 
 class VoiceInputThread(threading.Thread):
-    def __init__(self, stt_queue: queue.Queue):
+    def __init__(self, stt_queue: queue.Queue, provider_name: str = "vosk"):
         super().__init__(name="VoiceInputThread")
         self.daemon = False  # Ensure cleanup on exit
         self.stt_queue = stt_queue
+        self.provider_name = provider_name
         
         self.is_listening = False
         self.should_exit = False
@@ -22,8 +23,11 @@ class VoiceInputThread(threading.Thread):
     def load_model(self):
         """Lazy load the STT model on first use."""
         if not self.model_loaded:
-            logger.info("Loading STT model...")
-            self.stt_provider = VoskSTTProvider()
+            logger.info(f"Loading STT model ({self.provider_name})...")
+            if self.provider_name in STT_PROVIDERS:
+                self.stt_provider = STT_PROVIDERS[self.provider_name]()
+            else:
+                raise ValueError(f"Unknown STT provider: {self.provider_name}")
             self.model_loaded = True
             logger.info("STT model loaded.")
 
