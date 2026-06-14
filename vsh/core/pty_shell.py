@@ -14,9 +14,9 @@ from vsh.core.config import VshConfig
 from vsh.core.voice_input import VoiceInputThread
 from vsh.core.provider import Thinker, ThinkerResponse
 
-# ANSI escape sequences for cursor control
-CURSOR_DEFAULT = b"\033]112\007\033[0 q"
-CURSOR_RED_BLINK = b"\033]12;#ff3333\007\033[1 q"
+# ANSI escape sequences for cursor control and terminal title
+CURSOR_DEFAULT = b"\033]112\a\033[0 q\033]2;vsh\a"
+CURSOR_RED_BLINK = b"\033]12;rgb:ff/33/33\a\033[1 q\033]2;vsh [LISTENING]\a"
 
 class PtyShell:
     def __init__(self, config: VshConfig, thinker: Thinker = None):
