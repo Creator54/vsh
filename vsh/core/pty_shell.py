@@ -77,11 +77,11 @@ class PtyShell:
 
     def _toggle_listening(self):
         self.is_listening = self.voice_thread.toggle_listening()
-        self._update_cursor()
         if self.is_listening:
             self._notify("Listening...")
         else:
             self._notify("Stopped")
+        self._update_cursor()
 
     def _inject_command(self, cmd: str):
         """Inject text directly into the PTY."""
@@ -186,4 +186,7 @@ class PtyShell:
                     break
                 
                 sys.stdout.buffer.write(data)
+                # ponytail: force cursor state after PTY redraws (e.g. prompt resets)
+                if self.is_listening:
+                    sys.stdout.buffer.write(CURSOR_RED_BLINK)
                 sys.stdout.buffer.flush()
