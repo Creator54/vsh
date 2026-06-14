@@ -62,12 +62,13 @@ class VoiceInputThread(threading.Thread):
                 with no_stderr(), MicStream() as stream:
                     # Inner loop for the active microphone session
                     while self.is_listening and not self.should_exit:
-                        # stream.live_gen blocks until VAD detects speech, 
-                        # then yields chunks until silence
-                        
-                        audio_chunks = list(stream.live_gen(timeout=5))
+                        # Transition to actual phrase collection
+                        audio_chunks = list(stream.live_gen())
                         
                         if audio_chunks and self.is_listening:
+                            # Debug: Log phrase capture
+                            logger.debug(f"Captured phrase: {len(audio_chunks)} chunks")
+                            
                             # Transcribe the accumulated speech
                             text = self.stt_provider.transcribe_stream(iter(audio_chunks))
                             text = text.strip()

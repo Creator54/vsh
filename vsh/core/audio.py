@@ -70,7 +70,7 @@ class MicStream:
         self._queue.put(in_data)
         return None, pyaudio.paContinue
 
-    def live_gen(self, silence_limit=20, timeout=50, threshold=800):
+    def live_gen(self, silence_limit=15, timeout=50, threshold=400):
         """Generator that yields chunks until silence is detected."""
         silent_chunks = 0
         has_speech = False
