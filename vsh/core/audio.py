@@ -41,9 +41,8 @@ class AudioSignal:
 
 class MicStream:
     """Microphone audio stream using PyAudio."""
-    def __init__(self, rate=16000, chunk=1024):
-        self.rate = rate
-        self.chunk = chunk
+    def __init__(self, rate=16000, chunk=1024, device_index=None):
+        self.rate, self.chunk, self.device_index = rate, chunk, device_index
         self._audio = pyaudio.PyAudio()
         self._queue = queue.Queue()
         self._stream = None
@@ -54,6 +53,7 @@ class MicStream:
             channels=1,
             rate=self.rate,
             input=True,
+            input_device_index=self.device_index,
             frames_per_buffer=self.chunk,
             stream_callback=self._callback,
         )
@@ -70,7 +70,7 @@ class MicStream:
         self._queue.put(in_data)
         return None, pyaudio.paContinue
 
-    def live_gen(self, silence_limit=15, timeout=50, threshold=400):
+    def live_gen(self, silence_limit=15, timeout=50, threshold=400, verbose=False):
         """Generator that yields chunks until silence is detected."""
         silent_chunks = 0
         has_speech = False
@@ -79,16 +79,23 @@ class MicStream:
             if chunk is None: break
             yield chunk
             
-            # ponytail: stdlib audioop is faster than numpy for RMS
-            energy = audioop.rms(chunk, 2) # 2 bytes for int16
+            energy = audioop.rms(chunk, 2)
+            if verbose:
+                # VU meter: 1 bar per 100 RMS, up to 3000
+                bars = min(30, energy // 100)
+                meter = "|" + "#" * bars + " " * (30 - bars) + "|"
+                sys.stderr.write(f"\r{meter} {energy:5} (thr:{threshold})")
+                sys.stderr.flush()
             
             if energy > threshold:
+                if not has_speech and verbose: sys.stderr.write("\n[vsh] Speech detected...\n")
                 has_speech = True
                 silent_chunks = 0
             else:
                 silent_chunks += 1
             
             if (has_speech and silent_chunks > silence_limit) or (not has_speech and silent_chunks > timeout):
+                if verbose: sys.stderr.write("\n")
                 break
 
 if __name__ == "__main__":

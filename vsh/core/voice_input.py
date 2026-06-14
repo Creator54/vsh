@@ -6,11 +6,13 @@ from vsh.core.audio import MicStream
 from vsh.providers import STT_PROVIDERS
 
 class VoiceInputThread(threading.Thread):
-    def __init__(self, stt_queue: queue.Queue, provider_name: str = "vosk"):
+    def __init__(self, stt_queue: queue.Queue, provider_name: str = "vosk", device_index=None, verbose=False):
         super().__init__(name="VoiceInputThread")
         self.daemon = False  # Ensure cleanup on exit
         self.stt_queue = stt_queue
         self.provider_name = provider_name
+        self.device_index = device_index
+        self.verbose = verbose
         
         self.is_listening = False
         self.should_exit = False
@@ -59,15 +61,15 @@ class VoiceInputThread(threading.Thread):
 
             try:
                 from vsh.core.audio import no_stderr
-                with no_stderr(), MicStream() as stream:
+                with no_stderr(), MicStream(device_index=self.device_index) as stream:
                     # Inner loop for the active microphone session
                     while self.is_listening and not self.should_exit:
                         # Transition to actual phrase collection
-                        audio_chunks = list(stream.live_gen())
+                        audio_chunks = list(stream.live_gen(verbose=self.verbose))
                         
                         if audio_chunks and self.is_listening:
-                            # Debug: Log phrase capture
-                            logger.debug(f"Captured phrase: {len(audio_chunks)} chunks")
+                            # Log phrase capture
+                            if self.verbose: logger.info(f"Captured phrase: {len(audio_chunks)} chunks")
                             
                             # Transcribe the accumulated speech
                             text = self.stt_provider.transcribe_stream(iter(audio_chunks))

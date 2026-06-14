@@ -97,7 +97,8 @@ def shell(inner_shell: str=typer.Option(None, "--shell", "-s", help="Override in
           voice: bool=typer.Option(False, "--voice", help="Start with voice enabled"),
           llm: str=typer.Option(None, "--llm", help="Thinker provider to use"),
           stt: str=typer.Option(None, "--stt", help="STT provider to use"),
-          tts: str=typer.Option(None, "--tts", help="TTS provider to use")):
+          tts: str=typer.Option(None, "--tts", help="TTS provider to use"),
+          i: int=typer.Option(None, "--in", help="Audio input device index")):
     """Start vsh as a PTY shell wrapper."""
     setup(STATE["v"])
     config = load_config()
@@ -107,6 +108,7 @@ def shell(inner_shell: str=typer.Option(None, "--shell", "-s", help="Override in
     if llm: config.llm.provider = llm
     if stt: config.stt.provider = stt
     if tts: config.tts.provider = tts
+    if i is not None: config.stt.device_index = i
         
     thinker = None
     if config.llm.provider and config.llm.provider in THINKER_PROVIDERS:

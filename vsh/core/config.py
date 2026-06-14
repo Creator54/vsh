@@ -16,6 +16,7 @@ class KeybindConfig:
 @dataclass
 class ProviderConfig:
     provider: str = ""
+    device_index: int = None
 
 @dataclass
 class VshConfig:

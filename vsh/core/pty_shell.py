@@ -111,7 +111,12 @@ class PtyShell:
             self._handle_sigwinch(None, None)
             
             # Start background STT thread
-            self.voice_thread = VoiceInputThread(self.stt_queue, provider_name=self.config.stt.provider)
+            self.voice_thread = VoiceInputThread(
+                self.stt_queue, 
+                provider_name=self.config.stt.provider,
+                device_index=self.config.stt.device_index if hasattr(self.config.stt, 'device_index') else None,
+                verbose=self.verbose
+            )
             self.voice_thread.start()
             
             # Setup raw mode
