@@ -96,7 +96,7 @@ class MicStream:
                 silent_chunks += 1
             
             if (has_speech and silent_chunks > silence_limit) or (not has_speech and silent_chunks > timeout):
-                if verbose: sys.stderr.write("\n")
+                if verbose: sys.stderr.write("\r\033[K") # Clear the diagnostic line
                 break
 
 if __name__ == "__main__":

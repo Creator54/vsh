@@ -58,6 +58,7 @@ class VoskSTTProvider(STTProvider):
                 p = json.loads(rec.PartialResult()).get("partial", "")
                 if p: sys.stderr.write(f"\r\033[K• {p}"); sys.stderr.flush()
         
+        if self.model_name: sys.stderr.write("\r\033[K") # Clear partials
         logger.debug(f"Vosk stream finished. Total chunks: {chunk_count}")
         f = json.loads(rec.FinalResult()).get("text", "")
         if f:

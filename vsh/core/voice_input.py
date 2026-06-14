@@ -6,13 +6,15 @@ from vsh.core.audio import MicStream
 from vsh.providers import STT_PROVIDERS
 
 class VoiceInputThread(threading.Thread):
-    def __init__(self, stt_queue: queue.Queue, provider_name: str = "vosk", device_index=None, verbose=False):
+    def __init__(self, stt_queue: queue.Queue, provider_name: str = "vosk", device_index=None, verbose=False, vad_threshold=1000, vad_silence_limit=15):
         super().__init__(name="VoiceInputThread")
         self.daemon = False  # Ensure cleanup on exit
         self.stt_queue = stt_queue
         self.provider_name = provider_name
         self.device_index = device_index
         self.verbose = verbose
+        self.vad_threshold = vad_threshold
+        self.vad_silence_limit = vad_silence_limit
         
         self.is_listening = False
         self.should_exit = False
@@ -65,7 +67,7 @@ class VoiceInputThread(threading.Thread):
                     # Inner loop for the active microphone session
                     while self.is_listening and not self.should_exit:
                         # Transition to actual phrase collection
-                        audio_chunks = list(stream.live_gen(verbose=self.verbose))
+                        audio_chunks = list(stream.live_gen(threshold=self.vad_threshold, silence_limit=self.vad_silence_limit, verbose=self.verbose))
                         
                         if audio_chunks and self.is_listening:
                             # Log phrase capture

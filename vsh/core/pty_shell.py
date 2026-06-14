@@ -114,8 +114,10 @@ class PtyShell:
             self.voice_thread = VoiceInputThread(
                 self.stt_queue, 
                 provider_name=self.config.stt.provider,
-                device_index=self.config.stt.device_index if hasattr(self.config.stt, 'device_index') else None,
-                verbose=self.verbose
+                device_index=self.config.stt.device_index,
+                verbose=self.verbose,
+                vad_threshold=self.config.stt.vad_threshold,
+                vad_silence_limit=self.config.stt.vad_silence_limit
             )
             self.voice_thread.start()
             

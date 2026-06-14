@@ -102,7 +102,8 @@ def shell(inner_shell: str=typer.Option(None, "--shell", "-s", help="Override in
           llm: str=typer.Option(None, "--llm", help="Thinker provider to use"),
           stt: str=typer.Option(None, "--stt", help="STT provider to use"),
           tts: str=typer.Option(None, "--tts", help="TTS provider to use"),
-          i: int=typer.Option(None, "--in", help="Audio input device index")):
+          i: int=typer.Option(None, "--in", help="Audio input device index"),
+          vt: int=typer.Option(None, "--vt", help="VAD threshold")):
     """Start vsh as a PTY shell wrapper."""
     setup(STATE["v"])
     config = load_config()
@@ -113,6 +114,8 @@ def shell(inner_shell: str=typer.Option(None, "--shell", "-s", help="Override in
     if stt: config.stt.provider = stt
     if tts: config.tts.provider = tts
     if i is not None: config.stt.device_index = i
+    if vt is not None: config.stt.vad_threshold = vt
+    elif config.stt.vad_threshold == 1000: config.stt.vad_threshold = STATE["vad_thr"] # sync with global state if default
         
     thinker = None
     if config.llm.provider and config.llm.provider in THINKER_PROVIDERS:

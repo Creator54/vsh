@@ -17,6 +17,8 @@ class KeybindConfig:
 class ProviderConfig:
     provider: str = ""
     device_index: int = None
+    vad_threshold: int = 1000
+    vad_silence_limit: int = 15
 
 @dataclass
 class VshConfig:
