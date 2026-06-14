@@ -1,3 +1,7 @@
+import warnings
+# ponytail: silence deprecation noise at source
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+import audioop
 from vsh.core.provider import STTProvider
 from typing import Iterator
 from loguru import logger
@@ -15,10 +19,10 @@ class VoskSTTProvider(STTProvider):
     MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-en-in-0.5.zip"
     MODEL_NAME = "vosk-model-en-in-0.5"
 
-    def __init__(self, model_path: str = None):
-        if model_path is None:
-            # ponytail: keep models in a consistent relative path
-            model_path = str(Path(__file__).parent.parent.parent / "models" / self.MODEL_NAME)
+    def __init__(self, model_name: str = None):
+        self.model_name = model_name or self.MODEL_NAME
+        # ponytail: keep models in a consistent relative path
+        model_path = str(Path(__file__).parent.parent.parent / "models" / self.model_name)
         
         self._ensure_model(model_path)
         self.model = Model(model_path)
@@ -41,20 +45,22 @@ class VoskSTTProvider(STTProvider):
             os.remove(zip_path)
             logger.success(f"Model ready.")
 
-    def transcribe_stream(self, audio_stream: Iterator[bytes]) -> str:
-        results = []
+    def transcribe_stream(self, audio_stream: Iterator[bytes], on_phrase=None, rate: int = 16000) -> str:
+        rec, res, st = KaldiRecognizer(self.model, 16000), [], None
         for chunk in audio_stream:
-            if self.recognizer.AcceptWaveform(chunk):
-                results.append(json.loads(self.recognizer.Result()).get("text", ""))
+            if rate != 16000: chunk, st = audioop.ratecv(chunk, 2, 1, rate, 16000, st)
+            if rec.AcceptWaveform(chunk):
+                t = json.loads(rec.Result()).get("text", "")
+                if t:
+                    res.append(t)
+                    if on_phrase: on_phrase(t)
         
-        results.append(json.loads(self.recognizer.FinalResult()).get("text", ""))
-        return " ".join(filter(None, results))
+        f = json.loads(rec.FinalResult()).get("text", "")
+        if f:
+            res.append(f)
+            if on_phrase: on_phrase(f)
+        return " ".join(filter(None, res))
 
     def transcribe_file(self, file_path: str) -> str:
-        def file_gen():
-            with open(file_path, "rb") as f:
-                while True:
-                    data = f.read(4000)
-                    if not data: break
-                    yield data
-        return self.transcribe_stream(file_gen())
+        with open(file_path, "rb") as f:
+            return self.transcribe_stream(iter(lambda: f.read(4000), b""))

@@ -1,9 +1,35 @@
-from loguru import logger
-import pyaudio
-import queue
-import wave
-import numpy as np
+import warnings
+# ponytail: silence deprecation noise at source
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 import audioop
+import wave
+import os
+import sys
+import contextlib
+import pyaudio
+import numpy as np
+from loguru import logger
+import queue
+
+@contextlib.contextmanager
+def no_stderr():
+    with open(os.devnull, "w") as f, contextlib.redirect_stderr(f):
+        yield
+
+class AudioSignal:
+    def __init__(self, data: bytes, rate: int, width: int = 2):
+        self.data, self.rate, self.width = data, rate, width
+    def to_rate(self, target: int):
+        if self.rate == target: return self
+        d, _ = audioop.ratecv(self.data, self.width, 1, self.rate, target, None)
+        return AudioSignal(d, target, self.width)
+    def play(self, device_index=None):
+        with no_stderr():
+            pa = pyaudio.PyAudio()
+            s = pa.open(format=pyaudio.paInt16, channels=1, rate=self.rate, output=True, output_device_index=device_index)
+        s.write(self.data); s.stop_stream(); s.close(); pa.terminate()
+    def save(self, p: str):
+        with wave.open(p, 'wb') as f: f.setnchannels(1); f.setsampwidth(self.width); f.setframerate(self.rate); f.writeframes(self.data)
 
 class MicStream:
     """Microphone audio stream using PyAudio."""
@@ -56,25 +82,6 @@ class MicStream:
             
             if (has_speech and silent_chunks > silence_limit) or (not has_speech and silent_chunks > timeout):
                 break
-
-def play_audio(data: np.ndarray, rate=44100):
-    """Play a numpy array as audio."""
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paFloat32, channels=1, rate=rate, output=True)
-    stream.write(data.astype(np.float32).tobytes())
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
-
-def save_audio(data: np.ndarray, file_path: str, rate=44100):
-    """Save a numpy array as a WAV file using stdlib wave."""
-    if data.dtype in (np.float32, np.float64):
-        data = (data * 32767).astype(np.int16)
-    with wave.open(file_path, 'wb') as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2) # 16-bit
-        wf.setframerate(rate)
-        wf.writeframes(data.tobytes())
 
 if __name__ == "__main__":
     # ponytail: quick check if audio device is accessible

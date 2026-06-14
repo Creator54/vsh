@@ -5,9 +5,9 @@ import numpy as np
 class SupertonicTTSProvider(TTSProvider):
     """Real Supertonic Text-to-Speech provider."""
 
-    def __init__(self):
+    def __init__(self, voice="F1"):
         self.engine = TTS(auto_download=True)
-        self.voice_style = self.engine.get_voice_style(voice_name="F1")
+        self.voice_style = self.engine.get_voice_style(voice_name=voice)
 
     def synthesize(self, text: str) -> np.ndarray:
         # ponytail: 8 steps is a good balance of quality and speed
