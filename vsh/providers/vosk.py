@@ -8,7 +8,7 @@ from loguru import logger
 from pathlib import Path
 import json
 import os
-import zipfile
+import shutil
 import urllib.request
 import ssl
 from vosk import Model, KaldiRecognizer
@@ -33,17 +33,13 @@ class VoskSTTProvider(STTProvider):
         if not os.path.exists(model_path):
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
             logger.info(f"Downloading model {self.MODEL_NAME}...")
-            zip_path = model_path + ".zip"
-            
-            context = ssl._create_unverified_context()
-            with urllib.request.urlopen(self.MODEL_URL, context=context) as response, open(zip_path, 'wb') as out_file:
-                out_file.write(response.read())
-            
-            logger.info(f"Extracting model...")
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(os.path.dirname(model_path))
-            os.remove(zip_path)
-            logger.success(f"Model ready.")
+            ctx = ssl._create_unverified_context()
+            with urllib.request.urlopen(self.MODEL_URL, context=ctx) as r, open(model_path + ".zip", 'wb') as f:
+                shutil.copyfileobj(r, f)
+            logger.info("Extracting...")
+            shutil.unpack_archive(model_path + ".zip", os.path.dirname(model_path))
+            os.remove(model_path + ".zip")
+            logger.success("Model ready.")
 
     def transcribe_stream(self, audio_stream: Iterator[bytes], on_phrase=None, rate: int = 16000) -> str:
         rec, res, st = KaldiRecognizer(self.model, 16000), [], None

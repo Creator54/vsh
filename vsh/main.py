@@ -2,7 +2,7 @@ import typer, sys, json, pyaudio, wave, re, contextlib, os, warnings
 from loguru import logger
 from pathlib import Path
 from vosk import SetLogLevel
-from vsh.core.audio import MicStream
+from vsh.core.audio import AudioSignal, MicStream
 from vsh.providers.vosk import VoskSTTProvider
 from vsh.providers.supertonic import SupertonicTTSProvider
 
@@ -16,8 +16,6 @@ def setup(v: bool, i: int = None, o: int = None, vt: int = 800, vs: int = 20, m:
     STATE.update({"v": v, "in": i, "out": o, "vad_thr": vt, "vad_sil": vs, "model": m or STATE["model"]})
     logger.remove(); logger.add(sys.stderr, level="INFO" if v else "ERROR", format="<cyan>[vsh]</cyan> {message}")
     SetLogLevel(-1)
-
-from vsh.core.audio import AudioSignal, MicStream
 
 class LocalSpeech:
     def __init__(self, stt, tts): self.stt, self.tts = stt, tts
