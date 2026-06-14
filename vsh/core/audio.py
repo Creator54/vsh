@@ -13,8 +13,16 @@ import queue
 
 @contextlib.contextmanager
 def no_stderr():
-    with open(os.devnull, "w") as f, contextlib.redirect_stderr(f):
-        yield
+    """Aggressively redirect stderr at the OS level to silence low-level library noise."""
+    fd = sys.stderr.fileno()
+    with os.fdopen(os.dup(fd), 'w') as saved:
+        with open(os.devnull, 'w') as devnull:
+            sys.stderr.flush()
+            os.dup2(devnull.fileno(), fd)
+            try: yield
+            finally:
+                sys.stderr.flush()
+                os.dup2(saved.fileno(), fd)
 
 class AudioSignal:
     def __init__(self, data: bytes, rate: int, width: int = 2):
