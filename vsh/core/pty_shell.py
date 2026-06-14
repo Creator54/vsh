@@ -9,6 +9,7 @@ import fcntl
 import struct
 import queue
 import time
+import threading
 from loguru import logger
 from vsh.core.config import VshConfig
 from vsh.core.voice_input import VoiceInputThread
@@ -31,8 +32,28 @@ class PtyShell:
         self.master_fd = None
         self.slave_fd = None
         self.stt_queue = queue.Queue()
+        self.tts_queue = queue.Queue()
         self.voice_thread = None
+
+    def _tts_worker(self):
+        """Background worker to handle TTS synthesis and playback without blocking the shell."""
+        while True:
+            text = self.tts_queue.get()
+            if text is None: break
+            try:
+                wav = self.tts_provider.synthesize(text)
+                # Convert to int16 bytes
+                data = (wav * 32767 * 0.9).astype("int16").tobytes()
+                from vsh.core.audio import AudioSignal
+                # Use the configured device index for TTS if available
+                dev = self.config.tts.device_index if hasattr(self.config.tts, 'device_index') else None
+                AudioSignal(data, 44100).play(device_index=dev)
+            except Exception as e:
+                logger.error(f"TTS Error: {e}")
+            self.tts_queue.task_done()
         
+    def _setup_terminal(self):
+...
         # State
         self.is_listening = False
         self.old_tty_attrs = None
@@ -120,6 +141,11 @@ class PtyShell:
                 vad_silence_limit=self.config.stt.vad_silence_limit
             )
             self.voice_thread.start()
+
+            # Start background TTS thread
+            if self.tts_provider:
+                self.tts_worker = threading.Thread(target=self._tts_worker, daemon=True)
+                self.tts_worker.start()
             
             # Setup raw mode
             self._setup_terminal()
@@ -132,6 +158,8 @@ class PtyShell:
                 self._restore_terminal()
                 self.voice_thread.stop()
                 self.voice_thread.join(timeout=2.0)
+                if self.tts_provider:
+                    self.tts_queue.put(None)
                 os.waitpid(pid, 0)
 
     def _io_loop(self):
@@ -160,17 +188,10 @@ class PtyShell:
                             if response.command:
                                 self._inject_command(response.command)
                             if response.speech:
-                                # Play TTS
+                                # Send to TTS queue for background playback
                                 self._notify(f"VSH: {response.speech}")
                                 if self.tts_provider:
-                                    try:
-                                        wav = self.tts_provider.synthesize(response.speech)
-                                        # Convert to int16 bytes
-                                        data = (wav * 32767 * 0.9).astype("int16").tobytes()
-                                        from vsh.core.audio import AudioSignal
-                                        AudioSignal(data, 44100).play()
-                                    except Exception as e:
-                                        logger.error(f"TTS Error: {e}")
+                                    self.tts_queue.put(response.speech)
                     else:
                         # Direct injection
                         self._inject_command(transcript)
@@ -182,9 +203,6 @@ class PtyShell:
                 except OSError: break
                 if not data: break
                 
-                if self.verbose:
-                    self._notify(f"RAW INPUT: {data.hex(' ')}", color="33")
-
                 # Triggers: standard bytes or Kitty Protocol sequences
                 # 1c=Ctrl+\, 07=Ctrl+G, CSI 92;5u=Kitty Ctrl+\, CSI 103;5u=Kitty Ctrl+G
                 triggers = [b'\x1c', b'\x07', b'\x1b[92;5u', b'\x1b[103;5u']
