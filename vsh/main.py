@@ -1,10 +1,14 @@
-import typer, sys, json, pyaudio, wave, audioop, re, contextlib, os
+import typer, sys, json, pyaudio, wave, re, contextlib, os, warnings
 from loguru import logger
 from pathlib import Path
 from vosk import Model, KaldiRecognizer, SetLogLevel
 from supertonic import TTS as STTTS
 
-STATE = {"v": False, "in": None, "out": None, "vad_thr": 800, "vad_sil": 20, "model": "vosk-model-small-en-us-0.15"}
+# ponytail: silence deprecation noise at source
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+import audioop
+
+STATE = {"v": False, "in": None, "out": None, "vad_thr": 800, "vad_sil": 20, "model": "vosk-model-en-in-0.5"}
 
 @contextlib.contextmanager
 def no_stderr():
@@ -17,8 +21,9 @@ def no_stderr():
         os.dup2(old_stderr, sys.stderr.fileno())
         os.close(devnull); os.close(old_stderr)
 
-def setup(v: bool, i: int, o: int, vt: int, vs: int, m: str):
-    STATE.update({"v": v, "in": i, "out": o, "vad_thr": vt, "vad_sil": vs, "model": m})
+def setup(v: bool, i: int = None, o: int = None, vt: int = 800, vs: int = 20, m: str = None):
+    STATE.update({"v": v, "in": i, "out": o, "vad_thr": vt, "vad_sil": vs})
+    if m: STATE["model"] = m
     logger.remove(); logger.add(sys.stderr, level="INFO" if v else "ERROR", format="<cyan>[vsh]</cyan> {message}")
     SetLogLevel(-1)
 
@@ -31,7 +36,9 @@ class AudioSignal:
         return AudioSignal(d, target, self.width)
     def play(self):
         with no_stderr():
-            pa = pyaudio.PyAudio(); s = pa.open(format=pyaudio.paFloat32, channels=1, rate=self.rate, output=True, output_device_index=STATE["out"])
+            pa = pyaudio.PyAudio()
+            # ponytail: switch to paInt16 (matches width=2) to fix distortion
+            s = pa.open(format=pyaudio.paInt16, channels=1, rate=self.rate, output=True, output_device_index=STATE["out"])
         s.write(self.data); s.stop_stream(); s.close(); pa.terminate()
     def save(self, p: str):
         with wave.open(p, 'wb') as f: f.setnchannels(1); f.setsampwidth(self.width); f.setframerate(self.rate); f.writeframes(self.data)
@@ -62,76 +69,73 @@ class MicStream:
 class VoskAdapter:
     def __init__(self, m_name=None):
         p = Path.cwd() / "models" / (m_name or STATE["model"])
-        if not p.exists(): logger.error(f"Model {p.name} not found in ./models/"); raise typer.Exit(1)
+        if not p.exists(): logger.error(f"Model {p.name} not found"); raise typer.Exit(1)
         self.m = Model(str(p))
-    def transcribe(self, stream, live=False, rate=16000, width=2):
+    def transcribe(self, stream, live=False, rate=16000, width=2, on_phrase=None):
         rec, res, st = KaldiRecognizer(self.m, 16000), [], None
         for c in stream:
             if rate != 16000: c, st = audioop.ratecv(c, width, 1, rate, 16000, st)
             if rec.AcceptWaveform(c):
                 t = json.loads(rec.Result())["text"]
-                if t: 
-                    res.append(t)
+                if t:
                     if STATE["v"]: sys.stderr.write("\r\033[K")
-                    logger.info(f"Phrase: {t}")
-                    if not sys.stdout.isatty(): sys.stdout.write(t + " "); sys.stdout.flush()
+                    res.append(t); logger.info(f"Phrase: {t}")
+                    if on_phrase: on_phrase(t)
             elif live and STATE["v"]:
                 p = json.loads(rec.PartialResult())["partial"]
                 if p: sys.stderr.write(f"\r\033[K• {p}"); sys.stderr.flush()
         if live and STATE["v"]: sys.stderr.write("\r\033[K")
         f = json.loads(rec.FinalResult())["text"]
-        if f and not sys.stdout.isatty(): sys.stdout.write(f + "\n"); sys.stdout.flush()
+        if f and on_phrase: on_phrase(f)
         return " ".join(filter(None, res + [f]))
 
 class SupertonicAdapter:
     def __init__(self, voice="F1"): self.e = STTTS(auto_download=True); self.v = self.e.get_voice_style(voice_name=voice)
     def synthesize(self, text):
-        sentences = filter(None, re.split(r'(?<=[.!?]) +', text))
-        for s in sentences:
+        for s in filter(None, re.split(r'(?<=[.!?]) +', text)):
             wav, _ = self.e.synthesize(text=s, voice_style=self.v, total_steps=8)
-            yield AudioSignal(audioop.lin2lin((wav * 32767).astype("int16").tobytes(), 2, 2), 44100, 2)
+            # ponytail: gain reduction (0.9) to prevent clipping, convert to int16 bytes
+            data = (wav * 32767 * 0.9).astype("int16").tobytes()
+            yield AudioSignal(data, 44100, 2)
 
 class LocalSpeech:
     def __init__(self, stt, tts): self.stt, self.tts = stt, tts
-    def listen(self, sil=None, to=50, thr=None):
-        logger.info("LISTENING")
-        with MicStream() as s: return self.stt.transcribe(s.live_gen(sil, to, thr), live=True)
+    def listen(self, sil=None, to=50, thr=None, on_phrase=None):
+        sys.stderr.write("[vsh] LISTENING\n"); sys.stderr.flush()
+        with MicStream() as s:
+            return self.stt.transcribe(s.live_gen(sil, to, thr), live=True, on_phrase=on_phrase)
     def say(self, text):
         if text:
-            logger.info("SPEAKING")
+            sys.stderr.write("[vsh] SPEAKING\n"); sys.stderr.flush()
             for s in self.tts.synthesize(text): s.play()
 
-app = typer.Typer()
+app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 @app.callback()
-def main(
-    v: bool=typer.Option(False, "-v"), 
-    i: int=typer.Option(None, "--in"), 
-    o: int=typer.Option(None, "--out"), 
-    vt: int=typer.Option(800, "--vad-thr"), 
-    vs: int=typer.Option(20, "--vad-sil"),
-    m: str=typer.Option("vosk-model-small-en-us-0.15", "--model")
-): setup(v, i, o, vt, vs, m)
+def main(v: bool=typer.Option(False, "--verbose", "-v")): setup(v)
 
 @app.command()
 def list_devices():
+    """List local audio hardware."""
     p = pyaudio.PyAudio()
     for i in range(p.get_device_count()): print(f"[{i}] {p.get_device_info_by_index(i)['name']}")
     p.terminate()
 
 @app.command()
-def stt(file: str = typer.Option(None, "--file", "-f"), rate: int = 16000, width: int = 2):
-    e = LocalSpeech(VoskAdapter(), None)
-    if file == "-": res = e.stt.transcribe(iter(lambda: sys.stdin.buffer.read(4000), b""), rate=rate, width=width)
+def stt(file: str=typer.Option(None, "--file", "-f"), i: int=typer.Option(None, "--in"), m: str=typer.Option(None, "--model"), rate: int=16000):
+    """Audio -> Text"""
+    setup(STATE["v"], i, None, 800, 20, m); e = LocalSpeech(VoskAdapter(), None)
+    if file == "-": res = e.stt.transcribe(iter(lambda: sys.stdin.buffer.read(4000), b""), rate=rate)
     elif file: 
         with wave.open(file, 'rb') as f: sig = AudioSignal(f.readframes(f.getnframes()), f.getframerate(), f.getsampwidth())
         res = e.stt.transcribe([sig.to_rate(16000).data])
     else: res = e.listen()
-    if sys.stdout.isatty(): print(res)
+    if res: print(res)
 
 @app.command()
-def tts(text: str = typer.Argument(None), save: str = None, voice: str = "F1", stream: bool = False):
-    text = text or (not sys.stdin.isatty() and sys.stdin.read().strip())
+def tts(text: str=typer.Argument(None), o: int=typer.Option(None, "--out"), save: str=None, voice: str="F1", stream: bool=False):
+    """Text -> Audio"""
+    setup(STATE["v"], None, o); text = text or (not sys.stdin.isatty() and sys.stdin.read().strip())
     if not text: raise typer.Exit(logger.error("No input") or 1)
     e = LocalSpeech(None, SupertonicAdapter(voice=voice)); sigs = list(e.tts.synthesize(text))
     if save: AudioSignal(b"".join(s.data for s in sigs), sigs[0].rate, sigs[0].width).save(save); logger.info(f"Saved: {save}")
@@ -142,13 +146,12 @@ def tts(text: str = typer.Argument(None), save: str = None, voice: str = "F1", s
         if stream: sys.stdout.buffer.flush()
 
 @app.command()
-def duplex(voice: str = "F1"):
-    e = LocalSpeech(VoskAdapter(), SupertonicAdapter(voice=voice))
+def duplex(i: int=typer.Option(None, "--in"), o: int=typer.Option(None, "--out"), vt: int=800, vs: int=20, m: str=None, voice: str="F1"):
+    """Audio -> Text -> Audio"""
+    setup(STATE["v"], i, o, vt, vs, m); e = LocalSpeech(VoskAdapter(), SupertonicAdapter(voice=voice))
     try:
         while True:
-            if not STATE["v"]: sys.stderr.write("• "); sys.stderr.flush()
-            t = e.listen()
-            if t: print(t); e.say(t)
-    except KeyboardInterrupt: sys.stderr.write("\r\033[K"); logger.warning("Stopped")
+            e.listen(on_phrase=lambda t: (print(t), e.say(t)))
+    except KeyboardInterrupt: sys.stderr.write("\r\033[K[vsh] Stopped\n")
 
 if __name__ == "__main__": app()

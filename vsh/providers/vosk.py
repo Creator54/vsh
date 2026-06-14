@@ -12,8 +12,8 @@ from vosk import Model, KaldiRecognizer
 class VoskSTTProvider(STTProvider):
     """Vosk Offline Speech-to-Text provider."""
     
-    MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
-    MODEL_NAME = "vosk-model-small-en-us-0.15"
+    MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-en-in-0.5.zip"
+    MODEL_NAME = "vosk-model-en-in-0.5"
 
     def __init__(self, model_path: str = None):
         if model_path is None:

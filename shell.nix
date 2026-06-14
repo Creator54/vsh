@@ -1,13 +1,9 @@
 { pkgs ? import <nixpkgs> {} }:
 
 let
-  voskSmall = pkgs.fetchzip {
-    url = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip";
-    sha256 = "sha256-CIoPZ/krX+UW2w7c84W3oc1n4zc9BBS/fc8rVYUthuY=";
-  };
-  voskBig = pkgs.fetchzip {
-    url = "https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip";
-    sha256 = "sha256-CIoPZ/krX+UW2w7c84W3oc1n4zc9BBS/fc8rVYUthuY="; # placeholder
+  voskIN = pkgs.fetchzip {
+    url = "https://alphacephei.com/vosk/models/vosk-model-en-in-0.5.zip";
+    sha256 = "sha256-sE7NkBHP7sHRyyqPIkLxNuf2aZqNeNZVpSrBVYafWSU=";
   };
 in
 pkgs.mkShell {
@@ -18,12 +14,12 @@ pkgs.mkShell {
     export C_INCLUDE_PATH="${pkgs.portaudio}/include"
     export LIBRARY_PATH="${pkgs.portaudio}/lib"
     
-    # ponytail: symlink models for local access
+    # ponytail: symlink model for local access
     mkdir -p models
-    ln -sfn ${voskSmall} models/vosk-model-small-en-us-0.15
-    # ln -sfn {voskBig} models/vosk-model-en-us-0.22 # uncomment if big model needed
+    ln -sfn ${voskIN} models/vosk-model-en-in-0.5
 
-    if [ ! -d ".venv" ]; then uv venv; fi
-    uv sync --quiet
+    # unset any outer VIRTUAL_ENV so uv does not see a mismatch
+    unset VIRTUAL_ENV
+    if [ ! -d ".venv" ]; then uv venv && uv sync --quiet; fi
   '';
 }

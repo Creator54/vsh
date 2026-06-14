@@ -11,6 +11,7 @@ dependencies = [
     "vosk>=0.3.45",
     "loguru>=0.7.2",
     "numpy",
+    "click>=8.4.1",
 ]
 
 [build-system]
