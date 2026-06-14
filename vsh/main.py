@@ -80,7 +80,7 @@ def duplex(i: int=typer.Option(None, "--in"), o: int=typer.Option(None, "--out")
 
 from vsh.core.config import load_config
 from vsh.core.pty_shell import PtyShell
-from vsh.providers import THINKER_PROVIDERS
+from vsh.providers import THINKER_PROVIDERS, STT_PROVIDERS, TTS_PROVIDERS
 
 @app.command()
 def setup_config():
@@ -89,47 +89,47 @@ def setup_config():
     if not p.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("[shell]\nvoice_on_start = false\n\n[keybinds]\ntoggle_listen = \"ctrl+\\\\\"\n\n[stt]\nprovider = \"vosk\"\n\n[tts]\nprovider = \"supertonic\"\n")
-        from vsh.providers import THINKER_PROVIDERS, STT_PROVIDERS, TTS_PROVIDERS
+        print(f"Created {p}")
+    print("\nAdd to ~/.bashrc or terminal config:\n  exec vsh shell\n")
 
-        @app.command()
-        def setup_config():
-        ...
-        @app.command()
-        def shell(inner_shell: str=typer.Option(None, "--shell", "-s", help="Override inner shell"), 
-                  voice: bool=typer.Option(False, "--voice", help="Start with voice enabled"),
-                  llm: str=typer.Option(None, "--llm", help="Thinker provider to use"),
-                  stt: str=typer.Option(None, "--stt", help="STT provider to use"),
-                  tts: str=typer.Option(None, "--tts", help="TTS provider to use")):
-            """Start vsh as a PTY shell wrapper."""
-            setup(STATE["v"])
-            config = load_config()
+@app.command()
+def shell(inner_shell: str=typer.Option(None, "--shell", "-s", help="Override inner shell"), 
+          voice: bool=typer.Option(False, "--voice", help="Start with voice enabled"),
+          llm: str=typer.Option(None, "--llm", help="Thinker provider to use"),
+          stt: str=typer.Option(None, "--stt", help="STT provider to use"),
+          tts: str=typer.Option(None, "--tts", help="TTS provider to use")):
+    """Start vsh as a PTY shell wrapper."""
+    setup(STATE["v"])
+    config = load_config()
+    
+    if inner_shell: config.shell.inner_shell = inner_shell
+    if voice: config.shell.voice_on_start = voice
+    if llm: config.llm.provider = llm
+    if stt: config.stt.provider = stt
+    if tts: config.tts.provider = tts
+        
+    thinker = None
+    if config.llm.provider and config.llm.provider in THINKER_PROVIDERS:
+        thinker = THINKER_PROVIDERS[config.llm.provider]()
+    elif config.llm.provider:
+        logger.warning(f"Unknown LLM provider: {config.llm.provider}")
 
-            if inner_shell: config.shell.inner_shell = inner_shell
-            if voice: config.shell.voice_on_start = voice
-            if llm: config.llm.provider = llm
-            if stt: config.stt.provider = stt
-            if tts: config.tts.provider = tts
+    tts_provider = None
+    if config.tts.provider and config.tts.provider in TTS_PROVIDERS:
+        tts_provider = TTS_PROVIDERS[config.tts.provider]()
+    elif config.tts.provider:
+        logger.warning(f"Unknown TTS provider: {config.tts.provider}")
+        
+    pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
+    
+    # If voice_on_start is true, we simulate the first toggle
+    if config.shell.voice_on_start:
+        pty_shell._toggle_listening()
+        
+    try:
+        pty_shell.run()
+    except Exception as e:
+        logger.error(f"Shell crashed: {e}")
+        # Terminal gets restored by finally block in run()
 
-            thinker = None
-            if config.llm.provider and config.llm.provider in THINKER_PROVIDERS:
-                thinker = THINKER_PROVIDERS[config.llm.provider]()
-            elif config.llm.provider:
-                logger.warning(f"Unknown LLM provider: {config.llm.provider}")
-
-            tts_provider = None
-            if config.tts.provider and config.tts.provider in TTS_PROVIDERS:
-                tts_provider = TTS_PROVIDERS[config.tts.provider]()
-            elif config.tts.provider:
-                logger.warning(f"Unknown TTS provider: {config.tts.provider}")
-
-            pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
-
-            # If voice_on_start is true, we simulate the first toggle
-            if config.shell.voice_on_start:
-                pty_shell._toggle_listening()
-
-            try:
-                pty_shell.run()
-            except Exception as e:
-                logger.error(f"Shell crashed: {e}")
-                # Terminal gets restored by finally block in run()
+if __name__ == "__main__": app()
