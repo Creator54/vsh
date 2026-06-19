@@ -1,70 +1,36 @@
 # vsh: Voice Shell
 
-A Speech-to-Text and Text-to-Speech orchestrator, and an interactive voice-controlled shell wrapper. STT and TTS run fully offline; LLM providers can optionally use remote APIs (e.g. OpenAI). `vsh` allows you to seamlessly integrate LLMs and voice commands into your daily terminal workflow.
+An offline voice-controlled terminal wrapper with STT/TTS and LLM integration.
 
 ## Features
-- **Interactive PTY Shell**: Wrap your normal shell (bash/zsh/fish) and execute commands via voice.
-- **LLM Integration**: Ask questions and generate commands via built-in providers (Ollama, OpenAI, custom scripts).
-- **STT**: [Vosk](https://github.com/alphacep/vosk-api) (Offline)
-- **TTS**: [Supertonic](https://github.com/supertonic-tts/supertonic-python-sdk) (Offline)
-- **VAD**: Energy-based silence detection via `numpy`.
+- **PTY Shell**: Control bash/zsh/fish via voice.
+- **LLM**: Generate commands and ask questions (Ollama, OpenAI, custom scripts).
+- **Offline Audio**: Local STT ([Vosk](https://github.com/alphacep/vosk-api)) and TTS ([Supertonic](https://github.com/supertonic-tts/supertonic-python-sdk)).
 
 ## Installation
-Requires `portaudio` and `alsa-lib` (on Linux).
 
-### Global Installation (Recommended)
-**Via Nix Profile:**
+Requires `portaudio` and `alsa-lib` (Linux). Models download automatically on first run (~400MB).
+
 ```bash
+# Via UV (Recommended)
+uv tool install git+https://github.com/creator54/vsh.git
+
+# Via Nix Profile
 nix profile install github:creator54/vsh
 ```
-
-**Via UV Tool:**
-```bash
-uv tool install git+https://github.com/creator54/vsh.git
-```
-
-### Local Development (From Clone)
-If you have cloned the repository locally and want to install it:
-
-**With Nix:**
-```bash
-nix develop
-nix run . -- setup
-# Or to install globally from local clone: nix profile install .
-```
-
-**With UV:**
-```bash
-uv tool install -e .
-# Then run: vsh setup
-```
+*(For local development: `uv tool install -e .` or `nix run . -- setup`)*
 
 ## Usage
 
-| Mode | Command | Description |
-| :--- | :--- | :--- |
-| **Interactive Shell** | `vsh [--voice]` | Starts the voice-controlled terminal wrapper. |
-| **Setup Wizard** | `vsh setup` | Interactive prompt to configure LLMs, microphones, and shell keybinds. |
-| **Transcribe** | `vsh stt [--file audio.wav]` | Convert mic or WAV file audio to text (`stdout`). |
-| **Synthesize** | `vsh tts "text" [--save out.wav] [--stream]` | Convert text to spoken audio. `--stream` outputs raw bytes to stdout. |
+Start by configuring your LLMs, microphone, and keybinds:
+```bash
+vsh setup
+```
 
-### Additional Flags
+**Core Commands:**
+- `vsh [--voice]` : Start the voice-controlled shell. Options: `--verbose`, `--echo`.
+- `vsh stt [--file audio.wav]` : Convert audio to text (`stdout`).
+- `vsh tts "text" [--save out.wav] [--stream]` : Synthesize speech.
 
-| Flag | Applies To | Description |
-| :--- | :--- | :--- |
-| `--echo` | `vsh` (interactive) | Run in diagnostic echo mode without LLMs. |
-| `--verbose` / `-v` | `vsh` (interactive) | Enable verbose logging. |
-| `--stream` | `vsh tts` | Output raw audio bytes to stdout instead of playing through speakers. |
-
-### Environment Variable Overrides
-
-These override the corresponding values from `~/.config/vsh/config.toml`:
-
-| Variable | Description |
-| :--- | :--- |
-| `VSH_SHELL` | Inner shell to run (e.g. `/bin/zsh`). |
-| `VSH_VOICE` | Enable/disable voice on startup (`true`/`false`). |
-| `VSH_LLM` | LLM provider name (e.g. `ollama`, `openai`). |
-| `VSH_LLM_KEY` | API key for the configured LLM provider. |
-
-*Note: STT/TTS models download automatically on first run (~400MB total).*
+**Environment Overrides:**
+`VSH_SHELL`, `VSH_VOICE`, `VSH_LLM`, and `VSH_LLM_KEY` override defaults from `~/.config/vsh/config.toml`.
