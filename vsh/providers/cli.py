@@ -16,7 +16,7 @@ class CliThinker(Thinker):
         try:
             cmd = self.command
             stdin_input = prompt
-            
+
             # Support {} templating for tools that take prompt as argument
             if "{}" in cmd:
                 cmd = cmd.replace("{}", shlex.quote(prompt))

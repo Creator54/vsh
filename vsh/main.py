@@ -81,6 +81,7 @@ def main(
     ctx: typer.Context,
     voice: bool = typer.Option(False, "--voice", help="Start shell with microphone hot."),
     v: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logs."),
+    echo: bool = typer.Option(False, "--echo", help="Run in diagnostic echo mode without LLMs."),
 ):
     """Voice Shell — Default action is to start the interactive terminal wrapper."""
     setup_logger(v)
@@ -91,6 +92,9 @@ def main(
 
     if voice:
         config.shell.voice_on_start = True
+
+    if echo:
+        config.llm.provider = "echo"
 
     thinker = None
     if config.llm.provider:

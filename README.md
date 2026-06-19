@@ -3,7 +3,7 @@
 A 100% offline Speech-to-Text and Text-to-Speech orchestrator, and an interactive voice-controlled shell wrapper. `vsh` allows you to seamlessly integrate LLMs and voice commands into your daily terminal workflow.
 
 ## Features
-- **Interactive PTY Shell**: Wrap your normal shell (bash/zsh) and execute commands via voice.
+- **Interactive PTY Shell**: Wrap your normal shell (bash/zsh/fish) and execute commands via voice.
 - **LLM Integration**: Ask questions and generate commands via built-in providers (Ollama, OpenAI, custom scripts).
 - **STT**: [Vosk](https://github.com/alphacep/vosk-api) (Offline)
 - **TTS**: [Supertonic](https://github.com/supertonic-tts/supertonic-python-sdk) (Offline)

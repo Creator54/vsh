@@ -244,9 +244,20 @@ class PtyShell:
                     os.write(self.master_fd, b"\x04")
                     break
 
-                # Triggers: standard bytes or Kitty Protocol sequences
-                # 1c=Ctrl+\, 07=Ctrl+G, CSI 92;5u=Kitty Ctrl+\, CSI 103;5u=Kitty Ctrl+G
-                triggers = [b"\x1c", b"\x07", b"\x1b[92;5u", b"\x1b[103;5u"]
+                # Map configured keybind to raw bytes and Kitty protocol sequences
+                k = self.config.keybinds.toggle_listen.lower()
+                if k in ("ctrl+\\", "ctrl+\\\\"):
+                    triggers = [b"\x1c", b"\x1b[92;5u"]
+                elif k == "ctrl+v":
+                    triggers = [b"\x16", b"\x1b[118;5u"]
+                elif k == "ctrl+g":
+                    triggers = [b"\x07", b"\x1b[103;5u"]
+                else:
+                    triggers = [b"\x1c", b"\x1b[92;5u"] # default to Ctrl+\\
+
+                # Always allow Ctrl+G as a fallback hardware toggle
+                triggers.extend([b"\x07", b"\x1b[103;5u"])
+
                 if any(t in data for t in triggers):
                     for t in triggers:
                         data = data.replace(t, b"")

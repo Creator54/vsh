@@ -93,7 +93,6 @@ def interactive_setup() -> None:
             Choice("ollama", "Ollama (Local LLM)"),
             Choice("http", "HTTP API (OpenAI, Anthropic, Custom)"),
             Choice("cli", "Custom CLI Tool (e.g., codex)"),
-            Choice("echo", "Echo (Mock/Test)"),
         ],
         default="none"
     ).execute()
@@ -102,7 +101,7 @@ def interactive_setup() -> None:
     endpoint = ""
     api_key_env = ""
     cli_cmd = ""
-    
+
     if thinker == "ollama":
         model = inquirer.text(message="Ollama model:", default="llama3").execute()
     elif thinker == "http":
@@ -120,26 +119,64 @@ def interactive_setup() -> None:
         default=None
     ).execute()
 
+    keybind = inquirer.text(message="Shortcut key (toggle microphone):", default="Ctrl+\\").execute()
     add_shortcut = inquirer.confirm(message="Add a global shortcut to your shell config to launch vsh on demand?", default=True).execute()
 
     if add_shortcut:
-        default_rc = "~/.zshrc" if "zsh" in default_shell else "~/.bashrc"
+        if "fish" in inner_shell or "fish" in default_shell:
+            default_rc = "~/.config/fish/config.fish"
+        elif "zsh" in inner_shell or "zsh" in default_shell:
+            default_rc = "~/.zshrc"
+        else:
+            default_rc = "~/.bashrc"
+
         rc_file = inquirer.text(message="Shell config file:", default=default_rc).execute()
-        keybind = inquirer.text(message="Shortcut key:", default="Ctrl+\\").execute()
 
         is_zsh = "zsh" in rc_file
+        is_fish = "fish" in rc_file
+
         if keybind.lower() in ("ctrl+\\", "ctrl+\\\\"):
-            bind_str = "^\\" if is_zsh else "\\C-\\"
+            if is_zsh:
+                bind_str = "^\\\\"      # -> ^\\
+            elif is_fish:
+                bind_str = "\\c\\\\"    # -> \c\\
+            else:
+                bind_str = "\\C-\\"     # -> \C-\
         elif keybind.lower() == "ctrl+v":
-            bind_str = "^V" if is_zsh else "\\C-v"
+            if is_zsh:
+                bind_str = "^V"
+            elif is_fish:
+                bind_str = "\\cv"
+            else:
+                bind_str = "\\C-v"
         else:
             bind_str = keybind
 
-        append_cmd = f"\n# vsh hotkey\nbindkey -s '{bind_str}' 'vsh --voice\\n'\n" if is_zsh else f"\n# vsh hotkey\nbind '\"{bind_str}\":\"vsh --voice\\n\"'\n"
+        if is_zsh:
+            append_cmd = f"bindkey -s '{bind_str}' 'vsh --voice\\n'"
+        elif is_fish:
+            append_cmd = f"bind '{bind_str}' 'commandline \"vsh --voice\"; commandline -f execute'"
+        else:
+            append_cmd = f"bind '\"{bind_str}\":\"vsh --voice\\n\"'"
+
+        block_start = "# --- vsh configuration start ---"
+        block_end = "# --- vsh configuration end ---"
+        block = f"\n{block_start}\n{append_cmd}\n{block_end}\n"
+
         rc_path = Path(rc_file).expanduser()
         try:
-            with open(rc_path, "a") as f:
-                f.write(append_cmd)
+            import re
+            content = ""
+            if rc_path.exists():
+                content = rc_path.read_text()
+
+            pattern = re.compile(f"\\n?{block_start}.*?{block_end}\\n?", re.DOTALL)
+            if pattern.search(content):
+                new_content = pattern.sub(lambda _: block, content)
+            else:
+                new_content = content.rstrip() + block
+
+            rc_path.write_text(new_content)
             sys.stdout.write(f"\n[vsh] Added shortcut {keybind} to {rc_file}!\n")
         except Exception as e:
             sys.stdout.write(f"\n[vsh] Failed to write shortcut: {e}\n")
@@ -150,7 +187,7 @@ def interactive_setup() -> None:
         f'voice_on_start = {"true" if voice_on_start else "false"}',
         '',
         '[keybinds]',
-        'toggle_listen = "ctrl+\\\\"',
+        f'toggle_listen = "{keybind.replace(chr(92), chr(92)*2)}"',
         '',
         '[stt]',
         'provider = "vosk"',
@@ -166,7 +203,7 @@ def interactive_setup() -> None:
 
     if thinker and thinker != "none":
         lines.extend(['', '[llm]'])
-        
+
         if thinker == "http":
             lines.extend(['provider = "custom_http"', '', '[llm.custom_http]'])
             lines.extend([
@@ -220,9 +257,12 @@ def load_config() -> VshConfig:
                 data = tomllib.load(f)
 
             for k, v in data.items():
-                if k.startswith("llm."):
-                    profile_name = k[4:]
-                    cfg.custom_thinkers[profile_name] = dict(v)
+                if k == "llm":
+                    for sub_k, sub_v in v.items():
+                        if isinstance(sub_v, dict):
+                            cfg.custom_thinkers[sub_k] = dict(sub_v)
+                        elif hasattr(cfg.llm, sub_k):
+                            setattr(cfg.llm, sub_k, sub_v)
                 elif hasattr(cfg, k):
                     vars(getattr(cfg, k)).update(v)
 
