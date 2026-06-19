@@ -13,7 +13,7 @@ dependencies = [
     "numpy",
     "click>=8.4.1",
     "audioop-lts>=0.2.2 ; python_full_version >= '3.13'",
-    "prompt-toolkit>=3.0.52",
+    "inquirerpy>=0.3.4",
 ]
 
 [project.scripts]

@@ -1,3 +1,4 @@
+import contextlib
 import os
 import sys
 import tomllib
@@ -5,9 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pyaudio
+from InquirerPy import inquirer
+from InquirerPy.base.control import Choice
 from loguru import logger
-from prompt_toolkit import prompt
-from prompt_toolkit.shortcuts import radiolist_dialog, yes_no_dialog
 
 
 @dataclass
@@ -51,62 +52,68 @@ def _get_config_path() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "vsh" / "config.toml"
 
 
+@contextlib.contextmanager
+def no_alsa_errors():
+    with open(os.devnull, "w") as devnull:
+        old_stderr = os.dup(sys.stderr.fileno())
+        os.dup2(devnull.fileno(), sys.stderr.fileno())
+        try:
+            yield
+        finally:
+            os.dup2(old_stderr, sys.stderr.fileno())
+            os.close(old_stderr)
+
 def get_audio_devices():
-    try:
-        p = pyaudio.PyAudio()
-        devices = []
-        for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
-            if info.get("maxInputChannels", 0) > 0:
-                devices.append((i, info["name"]))
-        p.terminate()
-        return devices
-    except Exception:
-        return []
+    with no_alsa_errors():
+        try:
+            p = pyaudio.PyAudio()
+            devices = []
+            for i in range(p.get_device_count()):
+                info = p.get_device_info_by_index(i)
+                if info.get("maxInputChannels", 0) > 0:
+                    devices.append((i, info["name"]))
+            p.terminate()
+            return devices
+        except Exception:
+            return []
 
 def interactive_setup() -> None:
     """Prompt the user for first-time configuration and write config.toml."""
     sys.stdout.write("\n[vsh] First-time setup\n")
 
     default_shell = os.environ.get("SHELL", "/bin/bash")
-    inner_shell = prompt(f"Inner shell [{default_shell}]: ") or default_shell
+    inner_shell = inquirer.text(message="Inner shell:", default=default_shell).execute()
 
-    voice_on_start = yes_no_dialog(
-        title="Voice on Start",
-        text="Enable voice automatically on start?"
-    ).run()
+    voice_on_start = inquirer.confirm(message="Enable voice automatically on start?", default=False).execute()
 
-    thinker = radiolist_dialog(
-        title="Thinker Provider",
-        text="Select the default thinker (LLM) provider:",
-        values=[
-            ("none", "None (Direct shell injection)"),
-            ("echo", "Echo (Mock/Test)"),
-            ("ollama", "Ollama (Local LLM)"),
-        ]
-    ).run()
+    thinker = inquirer.select(
+        message="Select the default thinker (LLM) provider:",
+        choices=[
+            Choice("none", "None (Direct shell injection)"),
+            Choice("echo", "Echo (Mock/Test)"),
+            Choice("ollama", "Ollama (Local LLM)"),
+        ],
+        default="none"
+    ).execute()
 
     model = ""
     if thinker == "ollama":
-        model = prompt("Ollama model [llama3]: ") or "llama3"
+        model = inquirer.text(message="Ollama model:", default="llama3").execute()
 
     devices = get_audio_devices()
-    device_values = [(None, "Default System Mic")] + devices
-    device_index = radiolist_dialog(
-        title="Microphone",
-        text="Select your input device:",
-        values=device_values
-    ).run()
+    device_choices = [Choice(None, "Default System Mic")] + [Choice(d[0], f"[{d[0]}] {d[1]}") for d in devices]
+    device_index = inquirer.select(
+        message="Select your input device:",
+        choices=device_choices,
+        default=None
+    ).execute()
 
-    add_shortcut = yes_no_dialog(
-        title="Shell Shortcut",
-        text="Would you like to add a global shortcut to your shell config (.bashrc/.zshrc) to launch vsh on demand?"
-    ).run()
+    add_shortcut = inquirer.confirm(message="Add a global shortcut to your shell config to launch vsh on demand?", default=True).execute()
 
     if add_shortcut:
         default_rc = "~/.zshrc" if "zsh" in default_shell else "~/.bashrc"
-        rc_file = prompt(f"Shell config file [{default_rc}]: ") or default_rc
-        keybind = prompt("Shortcut key [Ctrl+\\]: ") or "Ctrl+\\"
+        rc_file = inquirer.text(message="Shell config file:", default=default_rc).execute()
+        keybind = inquirer.text(message="Shortcut key:", default="Ctrl+\\").execute()
 
         is_zsh = "zsh" in rc_file
         if keybind.lower() in ("ctrl+\\", "ctrl+\\\\"):
