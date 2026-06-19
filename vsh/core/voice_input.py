@@ -17,6 +17,7 @@ class VoiceInputThread(threading.Thread):
         verbose=False,
         vad_threshold=1000,
         vad_silence_limit=15,
+        volume_callback=None,
     ):
         super().__init__(name="VoiceInputThread")
         self.daemon = False  # Ensure cleanup on exit
@@ -26,6 +27,7 @@ class VoiceInputThread(threading.Thread):
         self.verbose = verbose
         self.vad_threshold = vad_threshold
         self.vad_silence_limit = vad_silence_limit
+        self.volume_callback = volume_callback
 
         self.is_listening = False
         self.should_exit = False
@@ -85,6 +87,7 @@ class VoiceInputThread(threading.Thread):
                                 silence_limit=self.vad_silence_limit,
                                 verbose=self.verbose,
                                 stop_check=lambda: not self.is_listening,
+                                volume_callback=self.volume_callback,
                             )
                         )
 

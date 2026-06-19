@@ -56,6 +56,7 @@ class PtyShell:
             verbose=self.verbose,
             vad_threshold=self.config.stt.vad_threshold,
             vad_silence_limit=self.config.stt.vad_silence_limit,
+            volume_callback=self._volume_callback,
         )
         self.pipeline_thread = None
         self.tts_worker = None
@@ -72,10 +73,16 @@ class PtyShell:
 
             if self.verbose:
                 logger.info(f"Processing: {transcript}")
+            else:
+                self._set_cursor_state("transcribing")
 
             if self.thinker:
+                if not self.verbose:
+                    self._set_cursor_state("thinking")
                 try:
                     response = self.thinker.ask(transcript)
+                    if not self.verbose:
+                        self._set_cursor_state("typing")
                     self._inject_command(response)
                 except Exception as e:
                     logger.error(f"Thinker Error: {e}")
@@ -83,6 +90,7 @@ class PtyShell:
                 # Direct injection
                 self._inject_command(transcript)
 
+            self._set_cursor_state("idle")
             self.stt_queue.task_done()
 
     def _tts_worker(self):
@@ -134,20 +142,55 @@ class PtyShell:
         except Exception:
             pass
 
-    def _update_cursor(self):
-        if self.is_listening:
-            sys.stdout.buffer.write(CURSOR_RED_BLINK)
+    def _volume_callback(self, energy: int, threshold: int):
+        """Update cursor color based on voice activity."""
+        if not getattr(self, "is_listening", False):
+            return
+
+        pipeline = getattr(self, "_pipeline_state", None)
+
+        if energy > threshold:
+            state = "listening_active"
+        else:
+            # If we are processing something, don't fall back to listening_idle,
+            # stay in the processing state so the user knows it's thinking!
+            state = pipeline if pipeline else "listening_idle"
+
+        current = getattr(self, "_current_cursor_state", "idle")
+        # Only issue escape sequence if state actually changed to avoid PTY flicker
+        if current != state:
+            self._set_cursor_state(state)
+
+    def _set_cursor_state(self, state: str):
+        """Update terminal cursor color based on processing state to avoid terminal text pollution."""
+        if state in ("transcribing", "thinking", "typing"):
+            self._pipeline_state = state
+        elif state == "idle":
+            self._pipeline_state = None
+
+        self._current_cursor_state = state
+        if state == "listening_active":
+            sys.stdout.buffer.write(b"\033]12;#ff00ff\a\033[1 q")  # Bright Pink blink
+        elif state == "listening_idle":
+            sys.stdout.buffer.write(b"\033]12;#880000\a\033[1 q")  # Dark Red blink
+        elif state == "transcribing":
+            sys.stdout.buffer.write(b"\033]12;#00ffff\a\033[1 q")  # Cyan
+        elif state == "thinking":
+            sys.stdout.buffer.write(b"\033]12;#ffff00\a\033[1 q")  # Yellow
+        elif state == "typing":
+            sys.stdout.buffer.write(b"\033]12;#00ff00\a\033[1 q")  # Green
         else:
             sys.stdout.buffer.write(CURSOR_DEFAULT)
         sys.stdout.buffer.flush()
 
     def _notify(self, msg: str, color="36"):
-        """Print a notification without displacing the current prompt."""
-        # We use stdout because stderr is aggressively silenced by the audio thread
-        # We print a newline before to push down past any current input
-        out = f"\r\n\033[{color}m[vsh]\033[0m {msg}\r\n"
-        sys.stdout.buffer.write(out.encode())
-        sys.stdout.buffer.flush()
+        """Legacy text notify for verbose mode only."""
+        if self.verbose:
+            sys.stdout.buffer.write(f"\r\n\033[{color}m[vsh]\033[0m {msg}\r\n".encode())
+            sys.stdout.buffer.flush()
+
+    def _clear_notify(self):
+        pass
 
     def _toggle_listening(self):
         self.is_listening = self.voice_thread.toggle_listening()
@@ -161,7 +204,9 @@ class PtyShell:
             self._notify(m, color=c)
         if self.is_listening:
             sys.stdout.buffer.write(b"\a")
-        self._update_cursor()
+            self._set_cursor_state("listening_idle")
+        else:
+            self._set_cursor_state("idle")
 
     def _inject_command(self, cmd: str):
         """Inject text directly into the PTY."""
@@ -305,6 +350,7 @@ class PtyShell:
 
                 sys.stdout.buffer.write(data)
                 # ponytail: force cursor state after PTY redraws (e.g. prompt resets)
-                if self.is_listening:
-                    sys.stdout.buffer.write(CURSOR_RED_BLINK)
+                state = getattr(self, "_current_cursor_state", "idle")
+                if state != "idle":
+                    self._set_cursor_state(state)
                 sys.stdout.buffer.flush()
