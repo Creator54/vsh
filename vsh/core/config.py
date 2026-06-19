@@ -92,7 +92,7 @@ def interactive_setup() -> None:
             Choice("none", "None (Direct shell injection)"),
             Choice("ollama", "Ollama (Local LLM)"),
             Choice("http", "HTTP API (OpenAI, Anthropic, Custom)"),
-            Choice("cli", "Custom CLI Tool (aichat, codex)"),
+            Choice("cli", "Custom CLI Tool (e.g., codex)"),
             Choice("echo", "Echo (Mock/Test)"),
         ],
         default="none"
@@ -110,7 +110,7 @@ def interactive_setup() -> None:
         api_key_env = inquirer.text(message="API Key Env Var:", default="OPENAI_API_KEY").execute()
         model = inquirer.text(message="Model name:", default="gpt-4o-mini").execute()
     elif thinker == "cli":
-        cli_cmd = inquirer.text(message="CLI Command:", default="aichat -s").execute()
+        cli_cmd = inquirer.text(message="CLI Command:", default='codex exec "{}"').execute()
 
     devices = get_audio_devices()
     device_choices = [Choice(None, "Default System Mic")] + [Choice(d[0], f"[{d[0]}] {d[1]}") for d in devices]
