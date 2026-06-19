@@ -29,6 +29,19 @@ class PtyShell:
         self.verbose = verbose
         self.tts_provider = tts_provider
 
+        # Precompute keybind triggers to avoid loop overhead
+        k = self.config.keybinds.toggle_listen.lower()
+        self.triggers = []
+        if k in ("ctrl+\\", "ctrl+\\\\"):
+            self.triggers = [b"\x1c", b"\x1b[92;5u", b"\x1b[92;133u", b"\x1b[28;5u", b"\x1b[28;133u"]
+        elif k == "ctrl+g":
+            self.triggers = [b"\x07", b"\x1b[103;5u", b"\x1b[103;133u"]
+        else:
+            self.triggers = [b"\x1c", b"\x1b[92;5u", b"\x1b[92;133u", b"\x1b[28;5u", b"\x1b[28;133u"]  # default
+
+        # Always provide Ctrl+G as a fallback (5u = Ctrl, 133u = Ctrl+NumLock)
+        self.triggers.extend([b"\x07", b"\x1b[103;5u", b"\x1b[103;133u"])
+
         # Determine which shell to run
         self.inner_shell = config.shell.inner_shell or os.environ.get("SHELL", "/bin/bash")
 
@@ -130,15 +143,22 @@ class PtyShell:
 
     def _notify(self, msg: str, color="36"):
         """Print a notification without displacing the current prompt."""
-        # Save cursor position, emit notification on a new line, restore cursor
-        sys.stderr.buffer.write(f"\0337\r\n\033[{color}m[vsh]\033[0m {msg}\r\n\0338".encode())
-        sys.stderr.buffer.flush()
+        # We use stdout because stderr is aggressively silenced by the audio thread
+        # We print a newline before to push down past any current input
+        out = f"\r\n\033[{color}m[vsh]\033[0m {msg}\r\n"
+        sys.stdout.buffer.write(out.encode())
+        sys.stdout.buffer.flush()
 
     def _toggle_listening(self):
         self.is_listening = self.voice_thread.toggle_listening()
-        m = "LISTENING" if self.is_listening else "STOPPED"
-        c = "1;35" if self.is_listening else "36"
-        self._notify(m, color=c)
+        if self.verbose:
+            m = (
+                f"LISTENING (Press {self.config.keybinds.toggle_listen} or Ctrl+G to pause)"
+                if self.is_listening
+                else "STOPPED"
+            )
+            c = "1;35" if self.is_listening else "36"
+            self._notify(m, color=c)
         if self.is_listening:
             sys.stdout.buffer.write(b"\a")
         self._update_cursor()
@@ -189,7 +209,18 @@ class PtyShell:
 
             # Setup raw mode
             self._setup_terminal()
-            self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} to toggle.")
+
+            # Defer UI updates slightly so the inner shell doesn't overwrite them
+            def show_startup_ui():
+                time.sleep(0.5)
+                if self.verbose:
+                    self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} or Ctrl+G to toggle.")
+                if self.config.shell.voice_on_start:
+                    # We inject a simulated toggle keypress into our own loop so it runs safely
+                    os.write(self.master_fd, b"\x00")  # A dummy byte to wake up select
+                    self._toggle_listening()
+
+            threading.Thread(target=show_startup_ui, daemon=True).start()
 
             try:
                 self._io_loop()
@@ -250,19 +281,11 @@ class PtyShell:
                     os.write(self.master_fd, b"\x04")
                     break
 
-                # Map configured keybind to raw bytes and Kitty protocol sequences
-                k = self.config.keybinds.toggle_listen.lower()
-                if k in ("ctrl+\\", "ctrl+\\\\"):
-                    triggers = [b"\x1c", b"\x1b[92;5u"]
-                elif k == "ctrl+v":
-                    triggers = [b"\x16", b"\x1b[118;5u"]
-                elif k == "ctrl+g":
-                    triggers = [b"\x07", b"\x1b[103;5u"]
-                else:
-                    triggers = [b"\x1c", b"\x1b[92;5u"]  # default to Ctrl+\\
+                with open("/tmp/vsh_keys.log", "a") as f:
+                    f.write(repr(data) + "\n")
 
-                if any(t in data for t in triggers):
-                    for t in triggers:
+                if any(t in data for t in self.triggers):
+                    for t in self.triggers:
                         data = data.replace(t, b"")
                     self._toggle_listening()
 

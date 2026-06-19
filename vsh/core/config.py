@@ -137,29 +137,24 @@ def interactive_setup() -> None:
         is_zsh = "zsh" in rc_file
         is_fish = "fish" in rc_file
 
-        if keybind.lower() in ("ctrl+\\", "ctrl+\\\\"):
-            if is_zsh:
-                bind_str = "^\\\\"  # -> ^\\
-            elif is_fish:
-                bind_str = "\\c\\\\"  # -> \c\\
-            else:
-                bind_str = "\\C-\\"  # -> \C-\
-        elif keybind.lower() == "ctrl+v":
-            if is_zsh:
-                bind_str = "^V"
-            elif is_fish:
-                bind_str = "\\cv"
-            else:
-                bind_str = "\\C-v"
-        else:
-            bind_str = keybind
-
+        append_cmd = ""
+        k = keybind.lower()
         if is_zsh:
-            append_cmd = f"bindkey -s '{bind_str}' 'vsh --voice\\n'"
+            b = "^\\\\" if k in ("ctrl+\\", "ctrl+\\\\") else ("^G" if k == "ctrl+g" else "^V")
+            append_cmd = f"bindkey -s '{b}' 'vsh --voice\\n'"
         elif is_fish:
-            append_cmd = f"bind '{bind_str}' 'commandline \"vsh --voice\"; commandline -f execute'"
-        else:
-            append_cmd = f'bind \'"{bind_str}":"vsh --voice\\n"\''
+            if k in ("ctrl+\\", "ctrl+\\\\"):
+                # \x1c is standard Ctrl+\, \e\[92\;5u is Kitty modifyOtherKeys
+                append_cmd = "bind \\x1c 'vsh --voice; commandline -f repaint'\n"
+                append_cmd += "bind \\e\\[92\\;5u 'vsh --voice; commandline -f repaint'"
+            elif k == "ctrl+g":
+                append_cmd = "bind \\cg 'vsh --voice; commandline -f repaint'\n"
+                append_cmd += "bind \\e\\[103\\;5u 'vsh --voice; commandline -f repaint'"
+            else:
+                append_cmd = "bind \\cv 'vsh --voice; commandline -f repaint'"
+        else:  # bash
+            b = "\\C-\\" if k in ("ctrl+\\", "ctrl+\\\\") else ("\\C-g" if k == "ctrl+g" else "\\C-v")
+            append_cmd = f'bind \'"{b}":"vsh --voice\\n"\''
 
         block_start = "# --- vsh configuration start ---"
         block_end = "# --- vsh configuration end ---"

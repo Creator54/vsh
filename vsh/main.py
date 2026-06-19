@@ -116,9 +116,6 @@ def main(
 
     pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
 
-    if config.shell.voice_on_start:
-        pty_shell._toggle_listening()
-
     try:
         pty_shell.run()
     except Exception as e:
