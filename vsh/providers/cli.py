@@ -14,10 +14,18 @@ class CliThinker(Thinker):
         if not prompt.strip():
             return "echo 'I did not catch that.'\n"
         try:
+            cmd = self.command
+            stdin_input = prompt
+            
+            # Support {} templating for tools that take prompt as argument
+            if "{}" in cmd:
+                cmd = cmd.replace("{}", shlex.quote(prompt))
+                stdin_input = None
+
             result = subprocess.run(
-                self.command,
+                cmd,
                 shell=True,
-                input=prompt,
+                input=stdin_input,
                 capture_output=True,
                 text=True,
                 timeout=15,
