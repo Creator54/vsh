@@ -9,18 +9,34 @@ A 100% offline Speech-to-Text and Text-to-Speech orchestrator, and an interactiv
 - **TTS**: [Supertonic](https://github.com/supertonic-tts/supertonic-python-sdk) (Offline)
 - **VAD**: Energy-based silence detection via `numpy`.
 
-## Setup
+## Installation
 Requires `portaudio` and `alsa-lib` (on Linux).
 
-### Nix (Recommended)
+### Global Installation (Recommended)
+**Via Nix Profile:**
 ```bash
-nix run github:creator54/vsh -- setup
+nix profile install github:creator54/vsh
 ```
 
-### Local Development
+**Via UV Tool:**
 ```bash
-nix develop # or nix-shell
-uv sync
+uv tool install git+https://github.com/creator54/vsh.git
+```
+
+### Local Development (From Clone)
+If you have cloned the repository locally and want to install it:
+
+**With Nix:**
+```bash
+nix develop
+nix run . -- setup
+# Or to install globally from local clone: nix profile install .
+```
+
+**With UV:**
+```bash
+uv tool install -e .
+# Then run: vsh setup
 ```
 
 ## Usage
