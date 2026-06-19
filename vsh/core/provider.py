@@ -1,21 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from enum import Enum
 
 import numpy as np
-from loguru import logger
-
-
-class VSHState(Enum):
-    IDLE = "idle"
-    LISTENING = "listening"
-    THINKING = "thinking"
-    SPEAKING = "speaking"
-
-
-def update_state(state: VSHState):
-    """Log the current state transition."""
-    logger.info(f"State changed: {state.value}")
 
 
 class STTProvider(ABC):

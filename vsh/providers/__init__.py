@@ -30,7 +30,10 @@ def resolve_thinker(name: str, config: VshConfig) -> Thinker:
     """
     # 1. Built-in registry
     if name in THINKER_PROVIDERS:
-        return THINKER_PROVIDERS[name]()
+        kwargs = {}
+        if name == "ollama" and config.llm.model:
+            kwargs["model"] = config.llm.model
+        return THINKER_PROVIDERS[name](**kwargs)
 
     # 2. Config profiles
     if name in config.custom_thinkers:

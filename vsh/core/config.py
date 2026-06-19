@@ -33,7 +33,7 @@ class ProviderConfig:
     command: str = ""
     format: str = "openai"
     response_path: str = ""
-    device_index: int = None
+    device_index: int | None = None
     vad_threshold: int = 1000
     vad_silence_limit: int = 15
 
@@ -184,13 +184,15 @@ def interactive_setup() -> None:
         except Exception as e:
             sys.stdout.write(f"\n[vsh] Failed to write shortcut: {e}\n")
 
+    import json
+
     lines = [
         "[shell]",
-        f'inner_shell = "{inner_shell}"',
-        f'voice_on_start = {"true" if voice_on_start else "false"}',
+        f"inner_shell = {json.dumps(inner_shell)}",
+        f"voice_on_start = {'true' if voice_on_start else 'false'}",
         "",
         "[keybinds]",
-        f'toggle_listen = "{keybind.replace(chr(92), chr(92)*2)}"',
+        f"toggle_listen = {json.dumps(keybind)}",
         "",
         "[stt]",
         'provider = "vosk"',
@@ -214,10 +216,10 @@ def interactive_setup() -> None:
             lines.extend(
                 [
                     'type = "http"',
-                    f'endpoint = "{endpoint}"',
-                    f'api_key_env = "{api_key_env}"',
+                    f"endpoint = {json.dumps(endpoint)}",
+                    f"api_key_env = {json.dumps(api_key_env)}",
                     'format = "openai"',
-                    f'model = "{model}"',
+                    f"model = {json.dumps(model)}",
                 ]
             )
         elif thinker == "cli":
@@ -225,13 +227,13 @@ def interactive_setup() -> None:
             lines.extend(
                 [
                     'type = "cli"',
-                    f'command = "{cli_cmd}"',
+                    f"command = {json.dumps(cli_cmd)}",
                 ]
             )
         else:
             lines.extend([f'provider = "{thinker}"'])
             if model:
-                lines.extend([f'model = "{model}"'])
+                lines.extend([f"model = {json.dumps(model)}"])
 
     lines.extend(
         [
@@ -281,6 +283,11 @@ def load_config() -> VshConfig:
         except Exception as e:
             logger.error(f"Failed to load {config_path}: {e}")
 
+        # Resolve api_key_env -> api_key for each custom thinker profile
+        for profile in cfg.custom_thinkers.values():
+            if "api_key_env" in profile:
+                profile["api_key"] = os.environ.get(profile["api_key_env"], "")
+
     # Environment overrides
     if "VSH_SHELL" in os.environ:
         cfg.shell.inner_shell = os.environ["VSH_SHELL"]
@@ -298,6 +305,6 @@ def load_config() -> VshConfig:
     config_path = _get_config_path()
     if not config_path.exists():
         interactive_setup()
-        cfg = VshConfig()
+        return load_config()
 
     return cfg

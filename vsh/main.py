@@ -14,7 +14,7 @@ from vsh.providers import TTS_PROVIDERS, resolve_thinker
 from vsh.providers.supertonic import SupertonicTTSProvider
 from vsh.providers.vosk import VoskSTTProvider
 
-STATE = {"v": False, "in": None, "out": None, "vad_thr": 1000, "vad_sil": 20, "model": "vosk-model-en-in-0.5"}
+STATE = {"v": False, "in": None, "out": None, "vad_thr": 1000, "vad_sil": 15, "model": "vosk-model-en-in-0.5"}
 
 
 class NoSuchCommandShowsHelp(typer.core.TyperGroup):
@@ -86,6 +86,9 @@ def main(
 ):
     """Voice Shell — Default action is to start the interactive terminal wrapper."""
     setup_logger(v)
+    if os.environ.get("VSH_ACTIVE"):
+        sys.stderr.write("[vsh] Already running inside vsh. Exiting.\n")
+        raise typer.Exit(0)
     if ctx.invoked_subcommand is not None:
         return
 
@@ -102,6 +105,7 @@ def main(
         try:
             thinker = resolve_thinker(config.llm.provider, config)
         except Exception as e:
+            sys.stderr.write(f"[vsh] Failed to load thinker '{config.llm.provider}': {e}\n")
             logger.error(f"Failed to load thinker '{config.llm.provider}': {e}")
 
     tts_provider = None
@@ -156,7 +160,8 @@ def tts(
     config = load_config()
     text = text or (not sys.stdin.isatty() and sys.stdin.read().strip())
     if not text:
-        raise typer.Exit(logger.error("No input") or 1)
+        logger.error("No input")
+        raise typer.Exit(code=1)
 
     sys.stderr.write("[vsh] VSH TTS active\n")
     with no_stderr():

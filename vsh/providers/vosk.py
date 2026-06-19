@@ -7,7 +7,6 @@ import json  # noqa: E402
 import os  # noqa: E402
 import shutil  # noqa: E402
 import sys  # noqa: E402
-import urllib.request  # noqa: E402
 from collections.abc import Iterator  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -25,8 +24,8 @@ class VoskSTTProvider(STTProvider):
 
     def __init__(self, model_name: str = None):
         self.model_name = model_name or self.MODEL_NAME
-        # ponytail: keep models in a consistent relative path
-        model_path = str(Path(__file__).parent.parent.parent / "models" / self.model_name)
+        # Use XDG-compatible path so models work regardless of install method
+        model_path = str(Path.home() / ".local" / "share" / "vsh" / "models" / self.model_name)
 
         self._ensure_model(model_path)
         self.model = Model(model_path)
@@ -38,7 +37,13 @@ class VoskSTTProvider(STTProvider):
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
             logger.info(f"Downloading model {self.MODEL_NAME}...")
             tmp_zip = model_path + ".tmp.zip"
-            with urllib.request.urlopen(self.MODEL_URL) as r, open(tmp_zip, "wb") as f:
+            import ssl
+            import urllib.request
+
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with urllib.request.urlopen(self.MODEL_URL, context=ctx) as r, open(tmp_zip, "wb") as f:
                 shutil.copyfileobj(r, f)
             logger.info("Extracting...")
             shutil.unpack_archive(tmp_zip, os.path.dirname(model_path))

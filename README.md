@@ -1,6 +1,6 @@
 # vsh: Voice Shell
 
-A 100% offline Speech-to-Text and Text-to-Speech orchestrator, and an interactive voice-controlled shell wrapper. `vsh` allows you to seamlessly integrate LLMs and voice commands into your daily terminal workflow.
+A Speech-to-Text and Text-to-Speech orchestrator, and an interactive voice-controlled shell wrapper. STT and TTS run fully offline; LLM providers can optionally use remote APIs (e.g. OpenAI). `vsh` allows you to seamlessly integrate LLMs and voice commands into your daily terminal workflow.
 
 ## Features
 - **Interactive PTY Shell**: Wrap your normal shell (bash/zsh/fish) and execute commands via voice.
@@ -46,6 +46,25 @@ uv tool install -e .
 | **Interactive Shell** | `vsh [--voice]` | Starts the voice-controlled terminal wrapper. |
 | **Setup Wizard** | `vsh setup` | Interactive prompt to configure LLMs, microphones, and shell keybinds. |
 | **Transcribe** | `vsh stt [--file audio.wav]` | Convert mic or WAV file audio to text (`stdout`). |
-| **Synthesize** | `vsh tts "text" [--save out.wav]` | Convert text to spoken audio. |
+| **Synthesize** | `vsh tts "text" [--save out.wav] [--stream]` | Convert text to spoken audio. `--stream` outputs raw bytes to stdout. |
+
+### Additional Flags
+
+| Flag | Applies To | Description |
+| :--- | :--- | :--- |
+| `--echo` | `vsh` (interactive) | Run in diagnostic echo mode without LLMs. |
+| `--verbose` / `-v` | `vsh` (interactive) | Enable verbose logging. |
+| `--stream` | `vsh tts` | Output raw audio bytes to stdout instead of playing through speakers. |
+
+### Environment Variable Overrides
+
+These override the corresponding values from `~/.config/vsh/config.toml`:
+
+| Variable | Description |
+| :--- | :--- |
+| `VSH_SHELL` | Inner shell to run (e.g. `/bin/zsh`). |
+| `VSH_VOICE` | Enable/disable voice on startup (`true`/`false`). |
+| `VSH_LLM` | LLM provider name (e.g. `ollama`, `openai`). |
+| `VSH_LLM_KEY` | API key for the configured LLM provider. |
 
 *Note: STT/TTS models download automatically on first run (~400MB total).*

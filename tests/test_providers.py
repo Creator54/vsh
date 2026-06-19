@@ -11,7 +11,8 @@ from vsh.providers.vosk import VoskSTTProvider
 class TestProviders(unittest.TestCase):
     @patch("vsh.providers.vosk.Model")
     @patch("vsh.providers.vosk.KaldiRecognizer")
-    def test_engine_init(self, mock_recognizer, mock_model):
+    @patch("vsh.providers.vosk.VoskSTTProvider._ensure_model")
+    def test_engine_init(self, mock_ensure, mock_recognizer, mock_model):
         stt = VoskSTTProvider()
         tts = MagicMock()
         engine = LocalSpeech(stt, tts)

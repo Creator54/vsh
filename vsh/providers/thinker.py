@@ -8,5 +8,5 @@ class EchoThinker(Thinker):
 
     def ask(self, prompt: str) -> str:
         if not prompt.strip():
-            return "echo 'I didn\\'t catch that.'\n"
-        return f"echo {shlex.quote('You said: ' + prompt)}\n"
+            return "echo 'I didn\\'t catch that.'"
+        return f"echo {shlex.quote('You said: ' + prompt)}"

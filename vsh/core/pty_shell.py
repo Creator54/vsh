@@ -136,10 +136,9 @@ class PtyShell:
 
     def _toggle_listening(self):
         self.is_listening = self.voice_thread.toggle_listening()
-        if self.verbose:
-            m = "LISTENING" if self.is_listening else "STOPPED"
-            c = "1;35" if self.is_listening else "36"
-            self._notify(m, color=c)
+        m = "LISTENING" if self.is_listening else "STOPPED"
+        c = "1;35" if self.is_listening else "36"
+        self._notify(m, color=c)
         if self.is_listening:
             sys.stdout.buffer.write(b"\a")
         self._update_cursor()
@@ -149,7 +148,10 @@ class PtyShell:
         if not cmd:
             return
         # We don't append newline! The user types Enter themselves.
-        os.write(self.master_fd, cmd.encode())
+        try:
+            os.write(self.master_fd, cmd.encode())
+        except OSError as e:
+            logger.error(f"Failed to write to PTY: {e}")
 
     def run(self):
         """Main entry point: fork PTY, start threads, and multiplex I/O."""
@@ -161,7 +163,11 @@ class PtyShell:
 
         if pid == 0:
             # Child process: execute the shell
-            os.execv(self.inner_shell, [self.inner_shell])
+            try:
+                os.execv(self.inner_shell, [self.inner_shell])
+            except Exception as e:
+                sys.stderr.write(f"[vsh] Failed to start shell: {self.inner_shell}: {e}\n")
+                os._exit(1)
         else:
             # Parent process: act as proxy
 
@@ -183,7 +189,7 @@ class PtyShell:
 
             # Setup raw mode
             self._setup_terminal()
-            self._notify("VSH active (LOCAL VERSION). Press Ctrl+\\ to toggle.")
+            self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} to toggle.")
 
             try:
                 self._io_loop()
@@ -254,9 +260,6 @@ class PtyShell:
                     triggers = [b"\x07", b"\x1b[103;5u"]
                 else:
                     triggers = [b"\x1c", b"\x1b[92;5u"]  # default to Ctrl+\\
-
-                # Always allow Ctrl+G as a fallback hardware toggle
-                triggers.extend([b"\x07", b"\x1b[103;5u"])
 
                 if any(t in data for t in triggers):
                     for t in triggers:
