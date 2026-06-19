@@ -1,12 +1,23 @@
-import threading
 import queue
+import threading
 import time
+
 from loguru import logger
+
 from vsh.core.audio import MicStream
 from vsh.providers import STT_PROVIDERS
 
+
 class VoiceInputThread(threading.Thread):
-    def __init__(self, stt_queue: queue.Queue, provider_name: str = "vosk", device_index=None, verbose=False, vad_threshold=1000, vad_silence_limit=15):
+    def __init__(
+        self,
+        stt_queue: queue.Queue,
+        provider_name: str = "vosk",
+        device_index=None,
+        verbose=False,
+        vad_threshold=1000,
+        vad_silence_limit=15,
+    ):
         super().__init__(name="VoiceInputThread")
         self.daemon = False  # Ensure cleanup on exit
         self.stt_queue = stt_queue
@@ -15,12 +26,12 @@ class VoiceInputThread(threading.Thread):
         self.verbose = verbose
         self.vad_threshold = vad_threshold
         self.vad_silence_limit = vad_silence_limit
-        
+
         self.is_listening = False
         self.should_exit = False
         self.model_loaded = False
         self.stt_provider = None
-        
+
         # Events to coordinate toggling without busy loops
         self._toggle_event = threading.Event()
 
@@ -63,24 +74,33 @@ class VoiceInputThread(threading.Thread):
 
             try:
                 from vsh.core.audio import no_stderr
+
                 with no_stderr(), MicStream(device_index=self.device_index) as stream:
                     # Inner loop for the active microphone session
                     while self.is_listening and not self.should_exit:
                         # Transition to actual phrase collection
-                        audio_chunks = list(stream.live_gen(threshold=self.vad_threshold, silence_limit=self.vad_silence_limit, verbose=self.verbose))
-                        
+                        audio_chunks = list(
+                            stream.live_gen(
+                                threshold=self.vad_threshold,
+                                silence_limit=self.vad_silence_limit,
+                                verbose=self.verbose,
+                                stop_check=lambda: not self.is_listening
+                            )
+                        )
+
                         if audio_chunks and self.is_listening:
                             # Log phrase capture
-                            if self.verbose: logger.info(f"Captured phrase: {len(audio_chunks)} chunks")
-                            
+                            if self.verbose:
+                                logger.info(f"Captured phrase: {len(audio_chunks)} chunks")
+
                             # Transcribe the accumulated speech
                             text = self.stt_provider.transcribe_stream(iter(audio_chunks))
                             text = text.strip()
                             if text:
                                 self.stt_queue.put(text)
-                                
+
             except Exception as e:
                 logger.error(f"Voice thread error: {e}")
-                time.sleep(1) # Prevent rapid crash loops
-                
+                time.sleep(1)  # Prevent rapid crash loops
+
         logger.debug("Voice input thread exiting cleanly.")
