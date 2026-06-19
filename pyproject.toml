@@ -16,6 +16,9 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
 ]
 
+[project.scripts]
+vsh = "vsh.main:app"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
