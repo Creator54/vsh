@@ -90,15 +90,27 @@ def interactive_setup() -> None:
         message="Select the default thinker (LLM) provider:",
         choices=[
             Choice("none", "None (Direct shell injection)"),
-            Choice("echo", "Echo (Mock/Test)"),
             Choice("ollama", "Ollama (Local LLM)"),
+            Choice("http", "HTTP API (OpenAI, Anthropic, Custom)"),
+            Choice("cli", "Custom CLI Tool (aichat, codex)"),
+            Choice("echo", "Echo (Mock/Test)"),
         ],
         default="none"
     ).execute()
 
     model = ""
+    endpoint = ""
+    api_key_env = ""
+    cli_cmd = ""
+    
     if thinker == "ollama":
         model = inquirer.text(message="Ollama model:", default="llama3").execute()
+    elif thinker == "http":
+        endpoint = inquirer.text(message="API Endpoint:", default="https://api.openai.com/v1/chat/completions").execute()
+        api_key_env = inquirer.text(message="API Key Env Var:", default="OPENAI_API_KEY").execute()
+        model = inquirer.text(message="Model name:", default="gpt-4o-mini").execute()
+    elif thinker == "cli":
+        cli_cmd = inquirer.text(message="CLI Command:", default="aichat -s").execute()
 
     devices = get_audio_devices()
     device_choices = [Choice(None, "Default System Mic")] + [Choice(d[0], f"[{d[0]}] {d[1]}") for d in devices]
@@ -153,20 +165,32 @@ def interactive_setup() -> None:
     ])
 
     if thinker and thinker != "none":
-        lines.extend([
-            '',
-            '[llm]',
-            f'provider = "{thinker}"',
-        ])
-        if model:
+        lines.extend(['', '[llm]'])
+        
+        if thinker == "http":
+            lines.extend(['provider = "custom_http"', '', '[llm.custom_http]'])
             lines.extend([
+                'type = "http"',
+                f'endpoint = "{endpoint}"',
+                f'api_key_env = "{api_key_env}"',
+                'format = "openai"',
                 f'model = "{model}"',
             ])
+        elif thinker == "cli":
+            lines.extend(['provider = "custom_cli"', '', '[llm.custom_cli]'])
+            lines.extend([
+                'type = "cli"',
+                f'command = "{cli_cmd}"',
+            ])
+        else:
+            lines.extend([f'provider = "{thinker}"'])
+            if model:
+                lines.extend([f'model = "{model}"'])
 
     lines.extend([
         '',
-        '# Built-in thinkers: echo, ollama',
-        '# Custom profiles (define any [llm.<name>] section):',
+        '# You can define additional custom profiles here.',
+        '# Example HTTP API:',
         '# [llm.openai]',
         '# type = "http"',
         '# endpoint = "https://api.openai.com/v1/chat/completions"',
@@ -174,6 +198,7 @@ def interactive_setup() -> None:
         '# format = "openai"',
         '# model = "gpt-4o-mini"',
         '#',
+        '# Example CLI Tool:',
         '# [llm.codex]',
         '# type = "cli"',
         '# command = "codex -p"',
