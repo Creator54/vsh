@@ -253,7 +253,7 @@ class PtyShell:
                 elif k == "ctrl+g":
                     triggers = [b"\x07", b"\x1b[103;5u"]
                 else:
-                    triggers = [b"\x1c", b"\x1b[92;5u"] # default to Ctrl+\\
+                    triggers = [b"\x1c", b"\x1b[92;5u"]  # default to Ctrl+\\
 
                 # Always allow Ctrl+G as a fallback hardware toggle
                 triggers.extend([b"\x07", b"\x1b[103;5u"])

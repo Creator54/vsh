@@ -24,6 +24,7 @@ class NoSuchCommandShowsHelp(typer.core.TyperGroup):
         command = super().get_command(ctx, cmd_name)
         if command is None:
             import click
+
             click.echo(f"Unknown command: '{cmd_name}'", err=True)
             click.echo("\n" + ctx.get_help())
             ctx.exit(0)

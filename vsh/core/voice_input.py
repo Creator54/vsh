@@ -84,7 +84,7 @@ class VoiceInputThread(threading.Thread):
                                 threshold=self.vad_threshold,
                                 silence_limit=self.vad_silence_limit,
                                 verbose=self.verbose,
-                                stop_check=lambda: not self.is_listening
+                                stop_check=lambda: not self.is_listening,
                             )
                         )
 

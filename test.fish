@@ -1,0 +1,1 @@
+bind '\c\\' 'echo hi'

@@ -63,6 +63,7 @@ def no_alsa_errors():
             os.dup2(old_stderr, sys.stderr.fileno())
             os.close(old_stderr)
 
+
 def get_audio_devices():
     with no_alsa_errors():
         try:
@@ -76,6 +77,7 @@ def get_audio_devices():
             return devices
         except Exception:
             return []
+
 
 def interactive_setup() -> None:
     """Prompt the user for first-time configuration and write config.toml."""
@@ -94,7 +96,7 @@ def interactive_setup() -> None:
             Choice("http", "HTTP API (OpenAI, Anthropic, Custom)"),
             Choice("cli", "Custom CLI Tool (e.g., codex)"),
         ],
-        default="none"
+        default="none",
     ).execute()
 
     model = ""
@@ -105,7 +107,9 @@ def interactive_setup() -> None:
     if thinker == "ollama":
         model = inquirer.text(message="Ollama model:", default="llama3").execute()
     elif thinker == "http":
-        endpoint = inquirer.text(message="API Endpoint:", default="https://api.openai.com/v1/chat/completions").execute()
+        endpoint = inquirer.text(
+            message="API Endpoint:", default="https://api.openai.com/v1/chat/completions"
+        ).execute()
         api_key_env = inquirer.text(message="API Key Env Var:", default="OPENAI_API_KEY").execute()
         model = inquirer.text(message="Model name:", default="gpt-4o-mini").execute()
     elif thinker == "cli":
@@ -113,14 +117,12 @@ def interactive_setup() -> None:
 
     devices = get_audio_devices()
     device_choices = [Choice(None, "Default System Mic")] + [Choice(d[0], f"[{d[0]}] {d[1]}") for d in devices]
-    device_index = inquirer.select(
-        message="Select your input device:",
-        choices=device_choices,
-        default=None
-    ).execute()
+    device_index = inquirer.select(message="Select your input device:", choices=device_choices, default=None).execute()
 
     keybind = inquirer.text(message="Shortcut key (toggle microphone):", default="Ctrl+\\").execute()
-    add_shortcut = inquirer.confirm(message="Add a global shortcut to your shell config to launch vsh on demand?", default=True).execute()
+    add_shortcut = inquirer.confirm(
+        message="Add a global shortcut to your shell config to launch vsh on demand?", default=True
+    ).execute()
 
     if add_shortcut:
         if "fish" in inner_shell or "fish" in default_shell:
@@ -137,11 +139,11 @@ def interactive_setup() -> None:
 
         if keybind.lower() in ("ctrl+\\", "ctrl+\\\\"):
             if is_zsh:
-                bind_str = "^\\\\"      # -> ^\\
+                bind_str = "^\\\\"  # -> ^\\
             elif is_fish:
-                bind_str = "\\c\\\\"    # -> \c\\
+                bind_str = "\\c\\\\"  # -> \c\\
             else:
-                bind_str = "\\C-\\"     # -> \C-\
+                bind_str = "\\C-\\"  # -> \C-\
         elif keybind.lower() == "ctrl+v":
             if is_zsh:
                 bind_str = "^V"
@@ -157,7 +159,7 @@ def interactive_setup() -> None:
         elif is_fish:
             append_cmd = f"bind '{bind_str}' 'commandline \"vsh --voice\"; commandline -f execute'"
         else:
-            append_cmd = f"bind '\"{bind_str}\":\"vsh --voice\\n\"'"
+            append_cmd = f'bind \'"{bind_str}":"vsh --voice\\n"\''
 
         block_start = "# --- vsh configuration start ---"
         block_end = "# --- vsh configuration end ---"
@@ -166,6 +168,7 @@ def interactive_setup() -> None:
         rc_path = Path(rc_file).expanduser()
         try:
             import re
+
             content = ""
             if rc_path.exists():
                 content = rc_path.read_text()
@@ -182,69 +185,78 @@ def interactive_setup() -> None:
             sys.stdout.write(f"\n[vsh] Failed to write shortcut: {e}\n")
 
     lines = [
-        '[shell]',
+        "[shell]",
         f'inner_shell = "{inner_shell}"',
         f'voice_on_start = {"true" if voice_on_start else "false"}',
-        '',
-        '[keybinds]',
+        "",
+        "[keybinds]",
         f'toggle_listen = "{keybind.replace(chr(92), chr(92)*2)}"',
-        '',
-        '[stt]',
+        "",
+        "[stt]",
         'provider = "vosk"',
     ]
     if device_index is not None:
-        lines.append(f'device_index = {device_index}')
+        lines.append(f"device_index = {device_index}")
 
-    lines.extend([
-        '',
-        '[tts]',
-        'provider = "supertonic"',
-    ])
+    lines.extend(
+        [
+            "",
+            "[tts]",
+            'provider = "supertonic"',
+        ]
+    )
 
     if thinker and thinker != "none":
-        lines.extend(['', '[llm]'])
+        lines.extend(["", "[llm]"])
 
         if thinker == "http":
-            lines.extend(['provider = "custom_http"', '', '[llm.custom_http]'])
-            lines.extend([
-                'type = "http"',
-                f'endpoint = "{endpoint}"',
-                f'api_key_env = "{api_key_env}"',
-                'format = "openai"',
-                f'model = "{model}"',
-            ])
+            lines.extend(['provider = "custom_http"', "", "[llm.custom_http]"])
+            lines.extend(
+                [
+                    'type = "http"',
+                    f'endpoint = "{endpoint}"',
+                    f'api_key_env = "{api_key_env}"',
+                    'format = "openai"',
+                    f'model = "{model}"',
+                ]
+            )
         elif thinker == "cli":
-            lines.extend(['provider = "custom_cli"', '', '[llm.custom_cli]'])
-            lines.extend([
-                'type = "cli"',
-                f'command = "{cli_cmd}"',
-            ])
+            lines.extend(['provider = "custom_cli"', "", "[llm.custom_cli]"])
+            lines.extend(
+                [
+                    'type = "cli"',
+                    f'command = "{cli_cmd}"',
+                ]
+            )
         else:
             lines.extend([f'provider = "{thinker}"'])
             if model:
                 lines.extend([f'model = "{model}"'])
 
-    lines.extend([
-        '',
-        '# You can define additional custom profiles here.',
-        '# Example HTTP API:',
-        '# [llm.openai]',
-        '# type = "http"',
-        '# endpoint = "https://api.openai.com/v1/chat/completions"',
-        '# api_key_env = "OPENAI_API_KEY"',
-        '# format = "openai"',
-        '# model = "gpt-4o-mini"',
-        '#',
-        '# Example CLI Tool:',
-        '# [llm.codex]',
-        '# type = "cli"',
-        '# command = "codex -p"',
-    ])
+    lines.extend(
+        [
+            "",
+            "# You can define additional custom profiles here.",
+            "# Example HTTP API:",
+            "# [llm.openai]",
+            '# type = "http"',
+            '# endpoint = "https://api.openai.com/v1/chat/completions"',
+            '# api_key_env = "OPENAI_API_KEY"',
+            '# format = "openai"',
+            '# model = "gpt-4o-mini"',
+            "#",
+            "# Example CLI Tool:",
+            "# [llm.codex]",
+            '# type = "cli"',
+            '# command = "codex -p"',
+        ]
+    )
 
     config_path = _get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines) + "\n")
     sys.stdout.write(f"\n[vsh] Config saved to {config_path}\n\n")
+
 
 def load_config() -> VshConfig:
     """Load configuration from file, then apply environment variable overrides."""

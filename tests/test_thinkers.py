@@ -193,6 +193,7 @@ class TestCliThinker(unittest.TestCase):
             # Force shell=False by patching subprocess.run directly
             def fake_run(*args, **kwargs):
                 raise FileNotFoundError("not found")
+
             with patch("subprocess.run", side_effect=fake_run):
                 result = thinker_shell_false.ask("hello")
         self.assertTrue(result.startswith("echo 'Command not found:"))
