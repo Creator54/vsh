@@ -98,6 +98,16 @@ class MicStream:
         """Generator that yields chunks until silence is detected."""
         silent_chunks = 0
         has_speech = False
+
+        # Dynamic VAD state: Persist across generator restarts!
+        if not hasattr(self, "_dynamic_noise_floor"):
+            self._dynamic_noise_floor = threshold
+            self._current_threshold = threshold
+
+        consecutive_speech = 0
+        consecutive_silence = 0
+        ui_is_listening = False
+
         while True:
             if stop_check and stop_check():
                 break
@@ -112,28 +122,61 @@ class MicStream:
             data_np = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
             energy = int(np.sqrt(np.mean(np.square(data_np)))) if len(data_np) > 0 else 0
 
+            # Auto-calibrate threshold based on ambient noise
+            if energy > self._current_threshold:
+                consecutive_speech += 1
+                consecutive_silence = 0
+                if consecutive_speech > 30:
+                    # 3 seconds of completely unbroken mechanical noise (e.g. a passing car or fan spike).
+                    # Force adapt the noise floor.
+                    self._dynamic_noise_floor = energy
+                    self._current_threshold = max(threshold, int(self._dynamic_noise_floor * 2.0))
+                    consecutive_speech = 0
+            else:
+                consecutive_speech = 0
+                consecutive_silence += 1
+                if energy > 0:  # Ignore pure 0s from OS-level mute so we don't ruin the calibration
+                    # Use a slow Exponential Moving Average (EMA) to prevent single downward spikes
+                    # (e.g. USB audio dropouts) from dragging the threshold down and causing false positives.
+                    self._dynamic_noise_floor = (0.9 * self._dynamic_noise_floor) + (0.1 * energy)
+                    self._current_threshold = max(threshold, int(self._dynamic_noise_floor * 2.0))
+
+            # UI Debounce & Hangover logic
+            if energy == 0:
+                ui_is_listening = False
+                display_energy = 0
+            else:
+                if consecutive_speech >= 3:
+                    ui_is_listening = True
+                elif consecutive_silence >= 10:  # 1.0 second hangover to prevent flickering during pauses between words
+                    ui_is_listening = False
+
+                if ui_is_listening:
+                    display_energy = max(energy, self._current_threshold + 1)
+                else:
+                    display_energy = min(energy, self._current_threshold)
+
             if volume_callback:
-                volume_callback(energy, threshold)
+                volume_callback(display_energy, self._current_threshold)
 
             if verbose:
                 # VU meter: 1 bar per 200 RMS, up to 6000
                 bars = min(30, energy // 200)
                 meter = "|" + "#" * bars + " " * (30 - bars) + "|"
-                sys.stderr.write(f"\r{meter} {energy:5} (thr:{threshold})")
+                sys.stderr.write(f"\r{meter} {energy:5} (thr:{self._current_threshold})")
                 sys.stderr.flush()
 
-            if energy > threshold:
+            if ui_is_listening:
                 if not has_speech and verbose:
                     sys.stderr.write("\n[vsh] Speech detected...\n")
                 has_speech = True
                 silent_chunks = 0
             else:
                 silent_chunks += 1
-
-            if (has_speech and silent_chunks > silence_limit) or (not has_speech and silent_chunks > timeout):
-                if verbose:
-                    sys.stderr.write("\r\033[K")  # Clear the diagnostic line
-                break
+                if (has_speech and silent_chunks > silence_limit) or (not has_speech and silent_chunks > timeout):
+                    if verbose:
+                        sys.stderr.write("\r\033[K")  # Clear the diagnostic line
+                    break
 
 
 if __name__ == "__main__":

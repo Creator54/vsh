@@ -18,6 +18,7 @@ class VoiceInputThread(threading.Thread):
         vad_threshold=1000,
         vad_silence_limit=15,
         volume_callback=None,
+        state_callback=None,
     ):
         super().__init__(name="VoiceInputThread")
         self.daemon = False  # Ensure cleanup on exit
@@ -28,11 +29,13 @@ class VoiceInputThread(threading.Thread):
         self.vad_threshold = vad_threshold
         self.vad_silence_limit = vad_silence_limit
         self.volume_callback = volume_callback
+        self.state_callback = state_callback
 
         self.is_listening = False
         self.should_exit = False
         self.model_loaded = False
         self.stt_provider = None
+        self.is_processing = False
 
         # Events to coordinate toggling without busy loops
         self._toggle_event = threading.Event()
@@ -80,13 +83,17 @@ class VoiceInputThread(threading.Thread):
                 with no_stderr(), MicStream(device_index=self.device_index) as stream:
                     # Inner loop for the active microphone session
                     while self.is_listening and not self.should_exit:
+                        if self.is_processing:
+                            time.sleep(0.1)
+                            continue
+
                         # Transition to actual phrase collection
                         audio_chunks = list(
                             stream.live_gen(
                                 threshold=self.vad_threshold,
                                 silence_limit=self.vad_silence_limit,
                                 verbose=self.verbose,
-                                stop_check=lambda: not self.is_listening,
+                                stop_check=lambda: not self.is_listening or self.is_processing,
                                 volume_callback=self.volume_callback,
                             )
                         )
@@ -100,7 +107,14 @@ class VoiceInputThread(threading.Thread):
                             text = self.stt_provider.transcribe_stream(iter(audio_chunks))
                             text = text.strip()
                             if text:
+                                # We have valid human speech! Lock the mic and show Processing.
+                                if getattr(self, "state_callback", None):
+                                    self.state_callback("transcribing")
                                 self.stt_queue.put(text)
+                            else:
+                                # False alarm (e.g. table bump, cough, fan noise).
+                                # Do nothing so the UI doesn't flicker, and let the mic naturally restart.
+                                pass
 
             except Exception as e:
                 logger.error(f"Voice thread error: {e}")

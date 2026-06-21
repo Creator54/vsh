@@ -57,12 +57,18 @@ class PtyShell:
             vad_threshold=self.config.stt.vad_threshold,
             vad_silence_limit=self.config.stt.vad_silence_limit,
             volume_callback=self._volume_callback,
+            state_callback=self._set_cursor_state,
         )
         self.pipeline_thread = None
         self.tts_worker = None
         self.is_listening = False
         self.old_tty_attrs = None
         self._interrupted = False
+        self.cols = 80
+        self.rows = 24
+        self._last_energy = 0
+        self._anim_frame = 0
+        self._last_key_press_time = 0.0
 
     def _pipeline_worker(self):
         """Background worker to handle thinking and coordination without blocking the shell."""
@@ -73,24 +79,27 @@ class PtyShell:
 
             if self.verbose:
                 logger.info(f"Processing: {transcript}")
-            else:
-                self._set_cursor_state("transcribing")
 
             if self.thinker:
-                if not self.verbose:
-                    self._set_cursor_state("thinking")
+                self._set_cursor_state("thinking")
                 try:
                     response = self.thinker.ask(transcript)
-                    if not self.verbose:
-                        self._set_cursor_state("typing")
+                    self._set_cursor_state("typing")
                     self._inject_command(response)
+                    # Queue TTS response if enabled
+                    if self.tts_provider and response:
+                        self._set_cursor_state("speaking")
+                        self.tts_queue.put(response)
+                    else:
+                        self._set_cursor_state("idle")
                 except Exception as e:
-                    logger.error(f"Thinker Error: {e}")
+                    sys.stderr.write(f"\r\n[vsh] Thinker Error: {e}\r\n")
+                    self._set_cursor_state("idle")
             else:
                 # Direct injection
                 self._inject_command(transcript)
+                self._set_cursor_state("idle")
 
-            self._set_cursor_state("idle")
             self.stt_queue.task_done()
 
     def _tts_worker(self):
@@ -110,7 +119,9 @@ class PtyShell:
                 AudioSignal(data, 44100).play(device_index=dev)
             except Exception as e:
                 logger.error(f"TTS Error: {e}")
-            self.tts_queue.task_done()
+            finally:
+                self._set_cursor_state("idle")
+                self.tts_queue.task_done()
 
     def _setup_terminal(self):
         """Save terminal state and enter raw mode."""
@@ -137,36 +148,41 @@ class PtyShell:
         try:
             buf = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"0000")
             rows, cols = struct.unpack("hh", buf)
+            self.rows, self.cols = rows, cols
             # Set it on the PTY
             fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         except Exception:
             pass
 
     def _volume_callback(self, energy: int, threshold: int):
-        """Update cursor color based on voice activity."""
+        self._last_energy = energy
+        self._last_threshold = threshold
         if not getattr(self, "is_listening", False):
             return
 
         pipeline = getattr(self, "_pipeline_state", None)
 
-        if energy > threshold:
+        if pipeline:
+            state = pipeline
+        elif energy > threshold:
             state = "listening_active"
         else:
-            # If we are processing something, don't fall back to listening_idle,
-            # stay in the processing state so the user knows it's thinking!
-            state = pipeline if pipeline else "listening_idle"
+            state = "listening_idle"
 
         current = getattr(self, "_current_cursor_state", "idle")
-        # Only issue escape sequence if state actually changed to avoid PTY flicker
         if current != state:
             self._set_cursor_state(state)
 
     def _set_cursor_state(self, state: str):
         """Update terminal cursor color based on processing state to avoid terminal text pollution."""
-        if state in ("transcribing", "thinking", "typing"):
+        if state in ("transcribing", "thinking", "typing", "speaking"):
             self._pipeline_state = state
+            if hasattr(self, "voice_thread"):
+                self.voice_thread.is_processing = True
         elif state == "idle":
             self._pipeline_state = None
+            if hasattr(self, "voice_thread"):
+                self.voice_thread.is_processing = False
 
         self._current_cursor_state = state
         if state == "listening_active":
@@ -294,6 +310,68 @@ class PtyShell:
                     except ProcessLookupError:
                         pass
 
+    def _render_ui(self):
+        """Render the 3-character state indicator and text in the top-right corner."""
+
+        braille_spin = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+        idle_pulse = [" • ", "(•)", "◖•◗", "(•)"]
+
+        state = getattr(self, "_current_cursor_state", "idle")
+
+        # If the software toggle is entirely OFF, vsh goes to sleep.
+        # Hide the UI completely so it behaves exactly like a normal shell.
+        if not getattr(self, "is_listening", False):
+            if self.cols > 16:
+                sys.stdout.buffer.write(f"\033[s\033[{self.cols-15}G\033[K\033[u".encode())
+                sys.stdout.buffer.flush()
+            return
+
+        indicator = "   "
+        text = ""
+
+        # Select indicator and text
+        braille_spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        idle_pulse = [" • ", "(•)", "◖•◗", "(•)"]
+
+        if state == "idle":
+            indicator = idle_pulse[(self._anim_frame // 4) % len(idle_pulse)]
+            text = "Idle"
+        elif state == "listening_idle":
+            if self._last_energy == 0:
+                indicator = " ─ "
+                text = "Mute"
+            else:
+                indicator = idle_pulse[(self._anim_frame // 4) % len(idle_pulse)]
+                text = "Idle"
+        elif state == "listening_active":
+            thr = getattr(self, "_last_threshold", getattr(self.config.stt, "vad_threshold", 1000))
+            f = self._anim_frame % 4
+            if self._last_energy > thr * 5:
+                indicator = ["⠿⠶⠤", "⠶⠿⠶", "⠤⠶⠿", "⠶⠿⠶"][f]
+            elif self._last_energy > thr * 2.5:
+                indicator = ["⠶⠤⠤", "⠤⠶⠤", "⠤⠤⠶", "⠤⠶⠤"][f]
+            else:
+                indicator = ["⠒⠤⠤", "⠤⠒⠤", "⠤⠤⠒", "⠤⠒⠤"][f]
+            text = "Listening"
+        elif state in ("transcribing", "thinking"):
+            indicator = f" {braille_spin[self._anim_frame % len(braille_spin)]} "
+            text = "Processing"
+        elif state in ("typing", "speaking"):
+            indicator = "⠶⠿⠶" if self._anim_frame % 2 == 0 else "⠤⠶⠤"
+            text = "Speaking"
+
+        self._anim_frame += 1
+
+        if self.cols > 16:
+            # Format: indicator + space + text (padded to 10 chars)
+            display_text = f"{indicator} {text:<10}"
+
+            # \033[s saves cursor. \033[{col}G moves cursor to far right of current row. \033[K clears to end of line. \033[u restores cursor.
+            color = "\033[36m" if state == "idle" else "\033[1;35m"  # Cyan for idle, Magenta for active
+            ui_str = f"\033[s\033[{self.cols-15}G{color}{display_text}\033[0m\033[K\033[u"
+            sys.stdout.buffer.write(ui_str.encode())
+            sys.stdout.buffer.flush()
+
     def _io_loop(self):
         """The main select() loop that multiplexes stdin and PTY. Non-blocking."""
         while True:
@@ -306,9 +384,11 @@ class PtyShell:
 
             try:
                 # Main multiplexer: No thinking or audio work here!
-                ready_r, _, _ = select.select(r_fds, [], [], 0.2)
+                ready_r, _, _ = select.select(r_fds, [], [], 0.1)
             except InterruptedError:
                 continue
+
+            self._render_ui()
 
             if self._interrupted:
                 logger.info("Interrupted by signal")
@@ -316,6 +396,7 @@ class PtyShell:
 
             # 1. Process keyboard input
             if sys.stdin.fileno() in ready_r:
+                self._last_key_press_time = time.time()
                 try:
                     data = os.read(sys.stdin.fileno(), 1024)
                 except OSError:
