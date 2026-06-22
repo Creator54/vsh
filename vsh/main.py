@@ -10,8 +10,7 @@ from vosk import SetLogLevel
 from vsh.core.audio import AudioSignal, MicStream
 from vsh.core.config import _get_config_path, interactive_setup, load_config
 from vsh.core.pty_shell import PtyShell
-from vsh.providers import TTS_PROVIDERS, resolve_thinker
-from vsh.providers.supertonic import SupertonicTTSProvider
+from vsh.providers import resolve_stt, resolve_thinker, resolve_tts
 from vsh.providers.vosk import VoskSTTProvider
 
 STATE = {"v": False, "in": None, "out": None, "vad_thr": 1000, "vad_sil": 15, "model": "vosk-model-en-in-0.5"}
@@ -108,10 +107,8 @@ def main(
             sys.stderr.write(f"[vsh] Failed to load thinker '{config.llm.provider}': {e}\n")
             logger.error(f"Failed to load thinker '{config.llm.provider}': {e}")
 
-    tts_provider = None
-    if config.tts.provider and config.tts.provider in TTS_PROVIDERS:
-        tts_provider = TTS_PROVIDERS[config.tts.provider]()
-    elif config.tts.provider:
+    tts_provider = resolve_tts(config)
+    if config.tts.provider and not tts_provider:
         logger.warning(f"Unknown TTS provider: {config.tts.provider}")
 
     pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
@@ -132,8 +129,11 @@ def stt(
     STATE["vad_thr"] = config.stt.vad_threshold
 
     sys.stderr.write("[vsh] VSH STT active\n")
+    stt_provider = resolve_stt(config)
+    if not stt_provider:
+        stt_provider = VoskSTTProvider(config.stt.model or STATE["model"])
     with no_stderr():
-        e = LocalSpeech(VoskSTTProvider(config.stt.model or STATE["model"]), None)
+        e = LocalSpeech(stt_provider, None)
 
     if file == "-":
         res = e.stt.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
@@ -162,9 +162,12 @@ def tts(
 
     sys.stderr.write("[vsh] VSH TTS active\n")
     with no_stderr():
-        tts_provider = SupertonicTTSProvider(voice="F1")
-        if config.tts.provider in TTS_PROVIDERS:
-            tts_provider = TTS_PROVIDERS[config.tts.provider]()
+        tts_provider = resolve_tts(config)
+        if not tts_provider:
+            # Fallback to a default if None
+            from vsh.providers.supertonic import SupertonicTTSProvider
+
+            tts_provider = SupertonicTTSProvider(voice="F1")
         e = LocalSpeech(None, tts_provider)
 
     wav = e.tts.synthesize(text)
@@ -229,13 +232,13 @@ def bind():
         # update toggle_listen
         import re
 
-        content = re.sub(r'toggle_listen\s*=\s*".*?"', f'toggle_listen = {json.dumps(keybind_data["name"])}', content)
+        content = re.sub(r'toggle_listen\s*=\s*".*?"', f"toggle_listen = {json.dumps(keybind_data['name'])}", content)
 
         # update toggle_listen_triggers or add it if missing
         if "toggle_listen_triggers" in content:
             content = re.sub(
                 r"toggle_listen_triggers\s*=\s*\[.*?\]",
-                f'toggle_listen_triggers = {json.dumps(keybind_data["triggers"])}',
+                f"toggle_listen_triggers = {json.dumps(keybind_data['triggers'])}",
                 content,
                 flags=re.DOTALL,
             )
@@ -243,7 +246,7 @@ def bind():
             # append it under [keybinds]
             content = re.sub(
                 r"(\[keybinds\].*?\n)",
-                f'\\1toggle_listen_triggers = {json.dumps(keybind_data["triggers"])}\n',
+                f"\\1toggle_listen_triggers = {json.dumps(keybind_data['triggers'])}\n",
                 content,
                 flags=re.DOTALL,
             )

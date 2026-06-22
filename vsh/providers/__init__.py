@@ -2,6 +2,7 @@ from vsh.core.config import VshConfig
 from vsh.core.provider import Thinker
 from vsh.providers.cli import CliThinker
 from vsh.providers.http import HttpThinker
+from vsh.providers.http_audio import HttpSTTProvider, HttpTTSProvider
 from vsh.providers.ollama import OllamaThinker
 from vsh.providers.supertonic import SupertonicTTSProvider
 from vsh.providers.thinker import EchoThinker
@@ -9,11 +10,32 @@ from vsh.providers.vosk import VoskSTTProvider
 
 STT_PROVIDERS = {
     "vosk": VoskSTTProvider,
+    "custom_http": HttpSTTProvider,
 }
 
 TTS_PROVIDERS = {
     "supertonic": SupertonicTTSProvider,
+    "custom_http": HttpTTSProvider,
 }
+
+
+def resolve_stt(config: VshConfig):
+    provider_name = config.stt.provider
+    if provider_name == "custom_http":
+        return HttpSTTProvider(config.stt)
+    elif provider_name in STT_PROVIDERS:
+        return STT_PROVIDERS[provider_name]()
+    return None
+
+
+def resolve_tts(config: VshConfig):
+    provider_name = config.tts.provider
+    if provider_name == "custom_http":
+        return HttpTTSProvider(config.tts)
+    elif provider_name in TTS_PROVIDERS:
+        return TTS_PROVIDERS[provider_name]()
+    return None
+
 
 THINKER_PROVIDERS = {
     "echo": EchoThinker,

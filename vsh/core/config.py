@@ -249,6 +249,59 @@ def interactive_setup() -> None:
             default="speak_and_command",
         ).execute()
 
+    stt_provider = inquirer.select(
+        message="Select the STT (Speech-to-Text) provider:",
+        choices=[
+            Choice("vosk", "Vosk (Local, Offline, Fast)"),
+            Choice("http", "HTTP API (Whisper, Gemini, Sarvam, etc.)"),
+        ],
+        default="vosk",
+    ).execute()
+
+    stt_http = {}
+    if stt_provider == "http":
+        stt_http["endpoint"] = inquirer.text(
+            message="STT API Endpoint:", default="https://api.openai.com/v1/audio/transcriptions"
+        ).execute()
+        stt_http["api_key_env"] = inquirer.text(message="STT API Key Env Var:", default="OPENAI_API_KEY").execute()
+        stt_http["format"] = inquirer.select(
+            message="STT API Format:",
+            choices=[
+                Choice("openai_whisper", "OpenAI Whisper"),
+                Choice("gemini", "Gemini Base64"),
+                Choice("sarvam", "Sarvam"),
+            ],
+            default="openai_whisper",
+        ).execute()
+        stt_http["model"] = inquirer.text(message="STT Model name:", default="whisper-1").execute()
+
+    tts_provider = inquirer.select(
+        message="Select the TTS (Text-to-Speech) provider:",
+        choices=[
+            Choice("supertonic", "Supertonic (Local, Offline)"),
+            Choice("http", "HTTP API (OpenAI TTS, ElevenLabs, Sarvam, etc.)"),
+            Choice("none", "None (Disable Voice Output)"),
+        ],
+        default="supertonic",
+    ).execute()
+
+    tts_http = {}
+    if tts_provider == "http":
+        tts_http["endpoint"] = inquirer.text(
+            message="TTS API Endpoint:", default="https://api.openai.com/v1/audio/speech"
+        ).execute()
+        tts_http["api_key_env"] = inquirer.text(message="TTS API Key Env Var:", default="OPENAI_API_KEY").execute()
+        tts_http["format"] = inquirer.select(
+            message="TTS API Format:",
+            choices=[
+                Choice("openai_tts", "OpenAI TTS"),
+                Choice("elevenlabs", "ElevenLabs"),
+                Choice("sarvam", "Sarvam"),
+            ],
+            default="openai_tts",
+        ).execute()
+        tts_http["model"] = inquirer.text(message="TTS Model name:", default="tts-1").execute()
+
     devices = get_audio_devices()
     device_choices = [Choice(None, "Default System Mic")] + [Choice(d[0], f"[{d[0]}] {d[1]}") for d in devices]
     device_index = inquirer.select(message="Select your input device:", choices=device_choices, default=None).execute()
@@ -309,18 +362,40 @@ def interactive_setup() -> None:
         f"toggle_listen_triggers = {json.dumps(keybind_data['triggers'])}",
         "",
         "[stt]",
-        'provider = "vosk"',
     ]
+
+    if stt_provider == "http":
+        lines.extend(['provider = "custom_http"', "", "[stt.custom_http]"])
+        lines.extend(
+            [
+                'type = "http"',
+                f"endpoint = {json.dumps(stt_http['endpoint'])}",
+                f"api_key_env = {json.dumps(stt_http['api_key_env'])}",
+                f"format = {json.dumps(stt_http['format'])}",
+                f"model = {json.dumps(stt_http['model'])}",
+            ]
+        )
+    else:
+        lines.extend([f'provider = "{stt_provider}"'])
+
     if device_index is not None:
         lines.append(f"device_index = {device_index}")
 
-    lines.extend(
-        [
-            "",
-            "[tts]",
-            'provider = "supertonic"',
-        ]
-    )
+    lines.extend(["", "[tts]"])
+
+    if tts_provider == "http":
+        lines.extend(['provider = "custom_http"', "", "[tts.custom_http]"])
+        lines.extend(
+            [
+                'type = "http"',
+                f"endpoint = {json.dumps(tts_http['endpoint'])}",
+                f"api_key_env = {json.dumps(tts_http['api_key_env'])}",
+                f"format = {json.dumps(tts_http['format'])}",
+                f"model = {json.dumps(tts_http['model'])}",
+            ]
+        )
+    else:
+        lines.extend([f'provider = "{tts_provider}"'])
 
     if thinker and thinker != "none":
         lines.extend(["", "[llm]", f'output_mode = "{output_mode}"'])
