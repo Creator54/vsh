@@ -214,11 +214,11 @@ def interactive_setup() -> None:
     voice_on_start = inquirer.confirm(message="Enable voice automatically on start?", default=False).execute()
 
     thinker = inquirer.select(
-        message="Select the default thinker (LLM) provider:",
+        message="Default LLM provider:",
         choices=[
-            Choice("none", "None (Direct shell injection)"),
+            Choice("none", "None (Direct injection)"),
             Choice("ollama", "Ollama (Local LLM)"),
-            Choice("http", "HTTP API (OpenAI, Anthropic, Custom)"),
+            Choice("http", "Cloud API (OpenAI, Anthropic, Custom)"),
             Choice("cli", "Custom CLI Tool (e.g., codex)"),
         ],
         default="none",
@@ -245,9 +245,9 @@ def interactive_setup() -> None:
         output_mode = inquirer.select(
             message="How should the LLM respond?",
             choices=[
-                Choice("speak_and_command", "Provide conversation and executable shell commands (Default)"),
-                Choice("command_only", "Provide executable shell commands only"),
-                Choice("speak_only", "Provide conversation only (No terminal injection)"),
+                Choice("speak_and_command", "Conversation & Commands (Default)"),
+                Choice("command_only", "Commands only"),
+                Choice("speak_only", "Conversation only (No terminal injection)"),
             ],
             default="speak_and_command",
         ).execute()
@@ -263,10 +263,10 @@ def interactive_setup() -> None:
     ).execute()
 
     stt_provider = inquirer.select(
-        message="Select the STT (Speech-to-Text) provider:",
+        message="Speech-to-Text (STT) provider:",
         choices=[
             Choice("vosk", "Vosk (Local, Offline, Fast)"),
-            Choice("http", "HTTP API (Whisper, Gemini, Sarvam, etc.)"),
+            Choice("http", "Cloud API (Whisper, Gemini, Sarvam, etc.)"),
         ],
         default="vosk",
     ).execute()
@@ -323,10 +323,10 @@ def interactive_setup() -> None:
         stt_http["model"] = inquirer.text(message="STT Model name:", default="whisper-1").execute()
 
     tts_provider = inquirer.select(
-        message="Select the TTS (Text-to-Speech) provider:",
+        message="Text-to-Speech (TTS) provider:",
         choices=[
             Choice("supertonic", "Supertonic (Local, Offline)"),
-            Choice("http", "HTTP API (OpenAI TTS, ElevenLabs, Sarvam, etc.)"),
+            Choice("http", "Cloud API (OpenAI TTS, ElevenLabs, Sarvam, etc.)"),
             Choice("none", "None (Disable Voice Output)"),
         ],
         default="supertonic",
@@ -351,12 +351,10 @@ def interactive_setup() -> None:
 
     devices = get_audio_devices()
     device_choices = [Choice(None, "Default System Mic")] + [Choice(d[0], f"[{d[0]}] {d[1]}") for d in devices]
-    device_index = inquirer.select(message="Select your input device:", choices=device_choices, default=None).execute()
+    device_index = inquirer.select(message="Input microphone:", choices=device_choices, default=None).execute()
 
     keybind_data = None
-    if inquirer.confirm(
-        message="Do you want to set a custom keybind to toggle the microphone?", default=True
-    ).execute():
+    if inquirer.confirm(message="Set a custom keybind to toggle the microphone?", default=True).execute():
         while True:
             kb = capture_keybind()
             if not kb:
@@ -383,7 +381,7 @@ def interactive_setup() -> None:
         sys.stdout.write(f"Selected keybind: {keybind_data['name']}\n")
 
     add_shortcut = inquirer.confirm(
-        message="Add a global shortcut to your shell config to launch vsh on demand?", default=True
+        message="Add a global shell shortcut to launch vsh on demand?", default=True
     ).execute()
 
     if add_shortcut:
