@@ -33,6 +33,7 @@ class ProviderConfig:
     api_key: str = ""
     api_key_env: str = ""
     model: str = ""
+    url: str = ""
     command: str = ""
     format: str = "openai"
     response_path: str = ""
@@ -258,6 +259,40 @@ def interactive_setup() -> None:
         default="vosk",
     ).execute()
 
+    vosk_model_name = ""
+    vosk_model_url = ""
+
+    if stt_provider == "vosk":
+        sys.stdout.write("\nFetching official Vosk model list...\n")
+        sys.stdout.flush()
+        import json
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen("https://alphacephei.com/vosk/models/model-list.json", timeout=10) as r:
+                models = json.loads(r.read().decode("utf-8"))
+
+            choices = []
+            for m in models:
+                if str(m.get("obsolete", "false")).lower() == "true":
+                    continue
+                name = f"[{m.get('lang', '?')}] {m.get('lang_text', '?')} | {m.get('name', '?')} | {m.get('type', '?')} | {m.get('size_text', '?')}"
+                choices.append(Choice(m, name))
+
+            selected_m = inquirer.fuzzy(
+                message="Search and select a Vosk model:",
+                choices=choices,
+                match_exact=True,
+            ).execute()
+
+            if selected_m:
+                vosk_model_name = selected_m["name"]
+                vosk_model_url = selected_m["url"]
+        except Exception as e:
+            sys.stderr.write(f"\nFailed to fetch models: {e}\nUsing default Indian English model.\n")
+            vosk_model_name = "vosk-model-en-in-0.5"
+            vosk_model_url = "https://alphacephei.com/vosk/models/vosk-model-en-in-0.5.zip"
+
     stt_http = {}
     if stt_provider == "http":
         stt_http["endpoint"] = inquirer.text(
@@ -375,6 +410,11 @@ def interactive_setup() -> None:
                 f"model = {json.dumps(stt_http['model'])}",
             ]
         )
+    elif stt_provider == "vosk":
+        lines.extend(['provider = "vosk"'])
+        if vosk_model_name:
+            lines.extend([f"model = {json.dumps(vosk_model_name)}"])
+            lines.extend([f"url = {json.dumps(vosk_model_url)}"])
     else:
         lines.extend([f'provider = "{stt_provider}"'])
 

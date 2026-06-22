@@ -23,6 +23,8 @@ def resolve_stt(config: VshConfig):
     provider_name = config.stt.provider
     if provider_name == "custom_http":
         return HttpSTTProvider(config.stt)
+    elif provider_name == "vosk":
+        return VoskSTTProvider(model_name=config.stt.model, model_url=config.stt.url)
     elif provider_name in STT_PROVIDERS:
         return STT_PROVIDERS[provider_name]()
     return None
