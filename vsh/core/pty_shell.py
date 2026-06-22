@@ -32,18 +32,40 @@ class PtyShell:
         # Precompute keybind triggers to avoid loop overhead
         k = self.config.keybinds.toggle_listen.lower()
         self.triggers = []
-        if k in ("ctrl+\\", "ctrl+\\\\"):
-            self.triggers = [b"\x1c", b"\x1b[92;5u", b"\x1b[92;133u", b"\x1b[28;5u", b"\x1b[28;133u"]
-        elif k == "ctrl+g":
-            self.triggers = [b"\x07", b"\x1b[103;5u", b"\x1b[103;133u"]
-        else:
-            self.triggers = [b"\x1c", b"\x1b[92;5u", b"\x1b[92;133u", b"\x1b[28;5u", b"\x1b[28;133u"]  # default
+
+        # Load custom triggers from config if available
+        if hasattr(self.config.keybinds, "toggle_listen_triggers") and self.config.keybinds.toggle_listen_triggers:
+            for t in self.config.keybinds.toggle_listen_triggers:
+                try:
+                    self.triggers.append(bytes.fromhex(t))
+                except Exception:
+                    pass
+
+        # Fallback for old configs
+        if not self.triggers:
+            if k in ("ctrl+\\", "ctrl+\\\\"):
+                self.triggers = [b"\x1c", b"\x1b[92;5u", b"\x1b[92;133u", b"\x1b[28;5u", b"\x1b[28;133u"]
+            elif k == "ctrl+g":
+                self.triggers = [b"\x07", b"\x1b[103;5u", b"\x1b[103;133u"]
+            else:
+                self.triggers = [b"\x1c", b"\x1b[92;5u", b"\x1b[92;133u", b"\x1b[28;5u", b"\x1b[28;133u"]  # default
 
         # Always provide Ctrl+G as a fallback (5u = Ctrl, 133u = Ctrl+NumLock)
-        self.triggers.extend([b"\x07", b"\x1b[103;5u", b"\x1b[103;133u"])
+        fallback_triggers = [b"\x07", b"\x1b[103;5u", b"\x1b[103;133u"]
+        for t in fallback_triggers:
+            if t not in self.triggers:
+                self.triggers.append(t)
 
         # Determine which shell to run
-        self.inner_shell = config.shell.inner_shell or os.environ.get("SHELL", "/bin/bash")
+        import shutil
+
+        self.inner_shell = (
+            config.shell.inner_shell
+            or os.environ.get("SHELL")
+            or shutil.which("bash")
+            or shutil.which("sh")
+            or "/bin/sh"
+        )
 
         self.master_fd = None
         self.slave_fd = None

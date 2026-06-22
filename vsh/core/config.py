@@ -20,6 +20,9 @@ class ShellConfig:
 @dataclass
 class KeybindConfig:
     toggle_listen: str = "ctrl+\\"
+    toggle_listen_triggers: list[str] = field(
+        default_factory=lambda: ["1c", "1b5b39323b3575", "1b5b39323b31333375", "1b5b32383b3575", "1b5b32383b31333375"]
+    )
 
 
 @dataclass
@@ -79,11 +82,129 @@ def get_audio_devices():
             return []
 
 
+def capture_keybind():
+    import os
+    import termios
+    import tty
+
+    sys.stdout.write("\nPress the key combination you want to use to toggle the microphone...\n")
+    sys.stdout.write("      (Press Enter or Esc to cancel)\n")
+    sys.stdout.flush()
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = os.read(fd, 32)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    if ch in (b"\r", b"\n", b"\x1b"):
+        return None
+
+    if ch == b"\x1c" or ch == b"\x1b[92;5u":
+        return {
+            "name": "ctrl+\\",
+            "triggers": [
+                b"\x1c".hex(),
+                b"\x1b[92;5u".hex(),
+                b"\x1b[92;133u".hex(),
+                b"\x1b[28;5u".hex(),
+                b"\x1b[28;133u".hex(),
+            ],
+            "bash": "\\C-\\",
+            "zsh": "^\\\\",
+            "fish": "\\c\\\\",
+        }
+
+    if ch == b"\x1d":
+        triggers = [b"\x1d".hex(), b"\x1b[93;5u".hex(), b"\x1b[93;133u".hex()]
+        return {"name": "ctrl+]", "triggers": triggers, "bash": "\\C-]", "zsh": "^]", "fish": "\\c]"}
+
+    if ch == b"\x00":
+        triggers = [b"\x00".hex(), b"\x1b[32;5u".hex(), b"\x1b[32;133u".hex()]
+        return {"name": "ctrl+space", "triggers": triggers, "bash": "\\C-@", "zsh": "^@", "fish": "\\c@"}
+
+    if len(ch) == 1 and 1 <= ch[0] <= 26 and ch[0] not in (9, 10, 13, 27):
+        char = chr(ch[0] + ord("a") - 1)
+        name = f"ctrl+{char}"
+        triggers = [ch.hex(), f"\x1b[{ord(char)};5u".encode().hex(), f"\x1b[{ord(char)};133u".encode().hex()]
+        return {
+            "name": name,
+            "triggers": triggers,
+            "bash": f"\\C-{char}",
+            "zsh": f"^{char.upper()}",
+            "fish": f"\\c{char}",
+        }
+
+    if len(ch) == 1 and 32 <= ch[0] <= 126:
+        char = chr(ch[0])
+        hex_repr = ch.hex()
+        return {"name": f"custom ('{char}')", "triggers": [hex_repr], "bash": None, "zsh": None, "fish": None}
+
+    hex_repr = ch.hex()
+    return {"name": f"custom ({hex_repr})", "triggers": [hex_repr], "bash": None, "zsh": None, "fish": None}
+
+
+def update_shell_rc_bind(rc_file: str, keybind_data: dict) -> bool:
+    import re
+
+    rc_path = Path(rc_file).expanduser()
+    is_zsh = "zsh" in rc_file
+    is_fish = "fish" in rc_file
+
+    name = keybind_data["name"]
+    append_cmd = ""
+
+    if is_zsh:
+        b = keybind_data.get("zsh")
+        if not b:
+            sys.stdout.write(f"\nWarning: Could not auto-generate zsh binding for {name}.\n")
+            return False
+        append_cmd = f"bindkey -s '{b}' 'vsh --voice\\n'"
+    elif is_fish:
+        b = keybind_data.get("fish")
+        if not b:
+            sys.stdout.write(f"\nWarning: Could not auto-generate fish binding for {name}.\n")
+            return False
+        append_cmd = f"bind {b} 'vsh --voice; commandline -f repaint'"
+    else:
+        b = keybind_data.get("bash")
+        if not b:
+            sys.stdout.write(f"\nWarning: Could not auto-generate bash binding for {name}.\n")
+            return False
+        append_cmd = f'bind \'"{b}":"vsh --voice\\n"\''
+
+    block_start = "# --- vsh configuration start ---"
+    block_end = "# --- vsh configuration end ---"
+    block = f"\n{block_start}\n{append_cmd}\n{block_end}\n"
+
+    try:
+        content = ""
+        if rc_path.exists():
+            content = rc_path.read_text()
+
+        pattern = re.compile(f"\\n?{block_start}.*?{block_end}\\n?", re.DOTALL)
+        if pattern.search(content):
+            new_content = pattern.sub(lambda _: block, content)
+        else:
+            new_content = content.rstrip() + block
+
+        rc_path.write_text(new_content)
+        sys.stdout.write(f"\nAdded shortcut {name} to {rc_file}!\n")
+        return True
+    except Exception as e:
+        sys.stdout.write(f"\nFailed to write shortcut: {e}\n")
+        return False
+
+
 def interactive_setup() -> None:
     """Prompt the user for first-time configuration and write config.toml."""
-    sys.stdout.write("\n[vsh] First-time setup\n")
+    sys.stdout.write("\nFirst-time setup\n")
 
-    default_shell = os.environ.get("SHELL", "/bin/bash")
+    import shutil
+
+    default_shell = os.environ.get("SHELL") or shutil.which("bash") or shutil.which("sh") or "/bin/sh"
     inner_shell = inquirer.text(message="Inner shell:", default=default_shell).execute()
 
     voice_on_start = inquirer.confirm(message="Enable voice automatically on start?", default=False).execute()
@@ -119,7 +240,35 @@ def interactive_setup() -> None:
     device_choices = [Choice(None, "Default System Mic")] + [Choice(d[0], f"[{d[0]}] {d[1]}") for d in devices]
     device_index = inquirer.select(message="Select your input device:", choices=device_choices, default=None).execute()
 
-    keybind = inquirer.text(message="Shortcut key (toggle microphone):", default="Ctrl+\\").execute()
+    keybind_data = None
+    if inquirer.confirm(
+        message="Do you want to set a custom keybind to toggle the microphone?", default=True
+    ).execute():
+        while True:
+            kb = capture_keybind()
+            if not kb:
+                break
+            if inquirer.confirm(message=f"You pressed {kb['name']}. Use this keybind?", default=True).execute():
+                keybind_data = kb
+                break
+
+    if not keybind_data:
+        keybind_data = {
+            "name": "ctrl+\\",
+            "triggers": [
+                b"\x1c".hex(),
+                b"\x1b[92;5u".hex(),
+                b"\x1b[92;133u".hex(),
+                b"\x1b[28;5u".hex(),
+                b"\x1b[28;133u".hex(),
+            ],
+            "bash": "\\C-\\",
+            "zsh": "^\\\\",
+        }
+        sys.stdout.write(f"Using default keybind: {keybind_data['name']}\n")
+    else:
+        sys.stdout.write(f"Selected keybind: {keybind_data['name']}\n")
+
     add_shortcut = inquirer.confirm(
         message="Add a global shortcut to your shell config to launch vsh on demand?", default=True
     ).execute()
@@ -133,51 +282,7 @@ def interactive_setup() -> None:
             default_rc = "~/.bashrc"
 
         rc_file = inquirer.text(message="Shell config file:", default=default_rc).execute()
-
-        is_zsh = "zsh" in rc_file
-        is_fish = "fish" in rc_file
-
-        append_cmd = ""
-        k = keybind.lower()
-        if is_zsh:
-            b = "^\\\\" if k in ("ctrl+\\", "ctrl+\\\\") else ("^G" if k == "ctrl+g" else "^V")
-            append_cmd = f"bindkey -s '{b}' 'vsh --voice\\n'"
-        elif is_fish:
-            if k in ("ctrl+\\", "ctrl+\\\\"):
-                # \x1c is standard Ctrl+\, \e\[92\;5u is Kitty modifyOtherKeys
-                append_cmd = "bind \\x1c 'vsh --voice; commandline -f repaint'\n"
-                append_cmd += "bind \\e\\[92\\;5u 'vsh --voice; commandline -f repaint'"
-            elif k == "ctrl+g":
-                append_cmd = "bind \\cg 'vsh --voice; commandline -f repaint'\n"
-                append_cmd += "bind \\e\\[103\\;5u 'vsh --voice; commandline -f repaint'"
-            else:
-                append_cmd = "bind \\cv 'vsh --voice; commandline -f repaint'"
-        else:  # bash
-            b = "\\C-\\" if k in ("ctrl+\\", "ctrl+\\\\") else ("\\C-g" if k == "ctrl+g" else "\\C-v")
-            append_cmd = f'bind \'"{b}":"vsh --voice\\n"\''
-
-        block_start = "# --- vsh configuration start ---"
-        block_end = "# --- vsh configuration end ---"
-        block = f"\n{block_start}\n{append_cmd}\n{block_end}\n"
-
-        rc_path = Path(rc_file).expanduser()
-        try:
-            import re
-
-            content = ""
-            if rc_path.exists():
-                content = rc_path.read_text()
-
-            pattern = re.compile(f"\\n?{block_start}.*?{block_end}\\n?", re.DOTALL)
-            if pattern.search(content):
-                new_content = pattern.sub(lambda _: block, content)
-            else:
-                new_content = content.rstrip() + block
-
-            rc_path.write_text(new_content)
-            sys.stdout.write(f"\n[vsh] Added shortcut {keybind} to {rc_file}!\n")
-        except Exception as e:
-            sys.stdout.write(f"\n[vsh] Failed to write shortcut: {e}\n")
+        update_shell_rc_bind(rc_file, keybind_data)
 
     import json
 
@@ -187,7 +292,8 @@ def interactive_setup() -> None:
         f"voice_on_start = {'true' if voice_on_start else 'false'}",
         "",
         "[keybinds]",
-        f"toggle_listen = {json.dumps(keybind)}",
+        f"toggle_listen = {json.dumps(keybind_data['name'])}",
+        f"toggle_listen_triggers = {json.dumps(keybind_data['triggers'])}",
         "",
         "[stt]",
         'provider = "vosk"',
@@ -252,7 +358,7 @@ def interactive_setup() -> None:
     config_path = _get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines) + "\n")
-    sys.stdout.write(f"\n[vsh] Config saved to {config_path}\n\n")
+    sys.stdout.write(f"\nConfig saved to {config_path}\n\n")
 
 
 def load_config() -> VshConfig:

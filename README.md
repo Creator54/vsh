@@ -22,15 +22,19 @@ nix profile install github:creator54/vsh
 
 ## Usage
 
-Start by configuring your LLMs, microphone, and keybinds:
-```bash
-vsh setup
-```
-
 **Core Commands:**
-- `vsh [--voice]` : Start the voice-controlled shell. Options: `--verbose`, `--echo`.
-- `vsh stt [--file audio.wav]` : Convert audio to text (`stdout`).
-- `vsh tts "text" [--save out.wav] [--stream]` : Synthesize speech.
+- `vsh setup` : First-time wizard to configure your LLM, microphone, and initial keybind.
+- `vsh bind` : Update your microphone toggle keybind and inject it into your shell config.
+- `vsh [--voice]` : Start the voice-controlled shell (`--verbose` for logs, `--echo` to print transcripts).
+- `vsh stt [--file <audio.wav>]` : Speech-to-text utility (records mic if no file provided).
+- `vsh tts "<text>" [--save <out.wav>] [--stream]` : Text-to-speech utility.
 
 **Environment Overrides:**
 `VSH_SHELL`, `VSH_VOICE`, `VSH_LLM`, and `VSH_LLM_KEY` override defaults from `~/.config/vsh/config.toml`.
+
+**Keybind Notes:**
+- **Terminal Protocols**: Standard terminals often drop modifiers for symbols or squash legacy keys together. To fix this in Kitty, explicitly map them in your `kitty.conf`:
+  - *`Ctrl+,`* : `map ctrl+, send_text all \x1b[44;5u`
+  - *`Ctrl+Backspace`* : `map ctrl+backspace send_text all \x1b[127;5u`
+- **Linux Intercepts**: Linux catches some signals (like `Ctrl+O` or `Ctrl+S`) before your shell does.
+  - *Fix*: Unbind it in your OS (e.g., add `stty discard undef` to `.bashrc` to free up `Ctrl+O`).

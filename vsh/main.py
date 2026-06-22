@@ -192,5 +192,89 @@ def setup():
     interactive_setup()
 
 
+@app.command()
+def bind():
+    """Interactively setup a new keybind and update shell config."""
+    import json
+
+    from vsh.core.config import _get_config_path, capture_keybind, update_shell_rc_bind
+
+    sys.stdout.write("Keybind Setup Wizard\n")
+
+    keybind_data = None
+    while True:
+        kb = capture_keybind()
+        if not kb:
+            sys.stdout.write("Aborted.\n")
+            return
+
+        from InquirerPy import inquirer
+
+        if inquirer.confirm(message=f"You pressed {kb['name']}. Use this keybind?", default=True).execute():
+            keybind_data = kb
+            break
+
+    sys.stdout.write(f"\nSelected keybind: {keybind_data['name']}\n")
+
+    config_path = _get_config_path()
+    if not config_path.exists():
+        sys.stdout.write("Config file not found. Please run 'vsh setup' first.\n")
+        return
+
+    try:
+        # We can't just dump TOML easily in python 3.11 without a 3rd party lib if we want to preserve comments
+        # But config.toml is usually clean, we'll try to update it safely by string replacement
+        content = config_path.read_text()
+
+        # update toggle_listen
+        import re
+
+        content = re.sub(r'toggle_listen\s*=\s*".*?"', f'toggle_listen = {json.dumps(keybind_data["name"])}', content)
+
+        # update toggle_listen_triggers or add it if missing
+        if "toggle_listen_triggers" in content:
+            content = re.sub(
+                r"toggle_listen_triggers\s*=\s*\[.*?\]",
+                f'toggle_listen_triggers = {json.dumps(keybind_data["triggers"])}',
+                content,
+                flags=re.DOTALL,
+            )
+        else:
+            # append it under [keybinds]
+            content = re.sub(
+                r"(\[keybinds\].*?\n)",
+                f'\\1toggle_listen_triggers = {json.dumps(keybind_data["triggers"])}\n',
+                content,
+                flags=re.DOTALL,
+            )
+
+        config_path.write_text(content)
+        sys.stdout.write("Updated config.toml with new keybind.\n")
+
+    except Exception as e:
+        sys.stdout.write(f"Failed to update config.toml: {e}\n")
+        return
+
+    from InquirerPy import inquirer
+
+    update_rc = inquirer.confirm(
+        message="Update your shell config (.bashrc/.zshrc) to launch vsh with this keybind?", default=True
+    ).execute()
+
+    if update_rc:
+        import shutil
+
+        default_shell = os.environ.get("SHELL") or shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+        if "fish" in default_shell:
+            default_rc = "~/.config/fish/config.fish"
+        elif "zsh" in default_shell:
+            default_rc = "~/.zshrc"
+        else:
+            default_rc = "~/.bashrc"
+
+        rc_file = inquirer.text(message="Shell config file:", default=default_rc).execute()
+        update_shell_rc_bind(rc_file, keybind_data)
+
+
 if __name__ == "__main__":
     app()
