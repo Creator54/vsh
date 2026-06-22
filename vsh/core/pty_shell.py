@@ -240,9 +240,7 @@ class PtyShell:
         """Update terminal cursor color based on processing state to avoid terminal text pollution."""
         if text is not None:
             self._current_transcript = text
-
-        if state not in ("transcribing", "thinking"):
-            self._current_transcript = ""
+            self._transcript_time = time.time()
 
         if state in ("transcribing", "thinking", "typing", "speaking"):
             self._pipeline_state = state
@@ -445,8 +443,19 @@ class PtyShell:
 
             transcript_display = ""
             t = ""
+
+            # Linger transcript for 3 seconds ONLY if idle (useful for Direct Injection to see what was injected)
+            linger_time = 3.0
+            time_since_transcript = time.time() - getattr(self, "_transcript_time", 0)
+            show_transcript_condition = state in ("transcribing", "thinking") or (
+                state == "idle" and time_since_transcript < linger_time
+            )
+
+            if not show_transcript_condition:
+                self._current_transcript = ""
+
             if (
-                state in ("transcribing", "thinking")
+                show_transcript_condition
                 and getattr(self.config.shell, "show_transcript", True)
                 and getattr(self, "_current_transcript", "")
                 and self.cols >= 40
