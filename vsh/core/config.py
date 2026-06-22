@@ -39,6 +39,7 @@ class ProviderConfig:
     device_index: int | None = None
     vad_threshold: int = 1000
     vad_silence_limit: int = 15
+    output_mode: str = "speak_and_command"
 
 
 @dataclass
@@ -236,6 +237,18 @@ def interactive_setup() -> None:
     elif thinker == "cli":
         cli_cmd = inquirer.text(message="CLI Command:", default='codex exec "{}"').execute()
 
+    output_mode = "speak_and_command"
+    if thinker != "none":
+        output_mode = inquirer.select(
+            message="How should the LLM respond?",
+            choices=[
+                Choice("speak_and_command", "Provide conversation and executable shell commands (Default)"),
+                Choice("command_only", "Provide executable shell commands only"),
+                Choice("speak_only", "Provide conversation only (No terminal injection)"),
+            ],
+            default="speak_and_command",
+        ).execute()
+
     devices = get_audio_devices()
     device_choices = [Choice(None, "Default System Mic")] + [Choice(d[0], f"[{d[0]}] {d[1]}") for d in devices]
     device_index = inquirer.select(message="Select your input device:", choices=device_choices, default=None).execute()
@@ -310,7 +323,7 @@ def interactive_setup() -> None:
     )
 
     if thinker and thinker != "none":
-        lines.extend(["", "[llm]"])
+        lines.extend(["", "[llm]", f'output_mode = "{output_mode}"'])
 
         if thinker == "http":
             lines.extend(['provider = "custom_http"', "", "[llm.custom_http]"])

@@ -105,13 +105,52 @@ class PtyShell:
             if self.thinker:
                 self._set_cursor_state("thinking")
                 try:
-                    response = self.thinker.ask(transcript)
+                    mode = getattr(self.config.llm, "output_mode", "speak_and_command")
+                    if mode == "command_only":
+                        prompt = (
+                            "You are a shell assistant. Output ONLY the raw executable shell command. Do not use markdown formatting. Do not provide explanations.\n\nUser request: "
+                            + transcript
+                        )
+                    elif mode == "speak_only":
+                        prompt = (
+                            "You are a shell assistant. Provide a conversational reply. Do not output executable commands.\n\nUser request: "
+                            + transcript
+                        )
+                    else:
+                        prompt = (
+                            "You are a shell assistant. Provide a brief conversational reply, and enclose the executable shell command inside a single ```bash code block.\n\nUser request: "
+                            + transcript
+                        )
+
+                    raw_response = self.thinker.ask(prompt)
+
+                    speech_text = ""
+                    command_text = ""
+
+                    if mode == "command_only":
+                        command_text = raw_response.strip()
+                    elif mode == "speak_only":
+                        speech_text = raw_response.strip()
+                    else:
+                        # Parse markdown blocks
+                        import re
+
+                        blocks = re.findall(r"```(?:bash|sh)?\n?(.*?)```", raw_response, re.DOTALL)
+                        if blocks:
+                            command_text = "\n".join(b.strip() for b in blocks)
+                            speech_text = re.sub(r"```(?:bash|sh)?\n?.*?```", "", raw_response, flags=re.DOTALL).strip()
+                        else:
+                            # Fallback if the LLM forgot the block
+                            speech_text = raw_response.strip()
+
                     self._set_cursor_state("typing")
-                    self._inject_command(response)
+                    if command_text:
+                        self._inject_command(command_text)
+
                     # Queue TTS response if enabled
-                    if self.tts_provider and response:
+                    if self.tts_provider and speech_text:
                         self._set_cursor_state("speaking")
-                        self.tts_queue.put(response)
+                        self.tts_queue.put(speech_text)
                     else:
                         self._set_cursor_state("idle")
                 except Exception as e:
@@ -344,7 +383,7 @@ class PtyShell:
         # Hide the UI completely so it behaves exactly like a normal shell.
         if not getattr(self, "is_listening", False):
             if self.cols > 16:
-                sys.stdout.buffer.write(f"\033[s\033[{self.cols-15}G\033[K\033[u".encode())
+                sys.stdout.buffer.write(f"\033[s\033[{self.cols - 15}G\033[K\033[u".encode())
                 sys.stdout.buffer.flush()
             return
 
@@ -390,7 +429,7 @@ class PtyShell:
 
             # \033[s saves cursor. \033[{col}G moves cursor to far right of current row. \033[K clears to end of line. \033[u restores cursor.
             color = "\033[36m" if state == "idle" else "\033[1;35m"  # Cyan for idle, Magenta for active
-            ui_str = f"\033[s\033[{self.cols-15}G{color}{display_text}\033[0m\033[K\033[u"
+            ui_str = f"\033[s\033[{self.cols - 15}G{color}{display_text}\033[0m\033[K\033[u"
             sys.stdout.buffer.write(ui_str.encode())
             sys.stdout.buffer.flush()
 
