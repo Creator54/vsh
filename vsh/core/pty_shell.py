@@ -253,12 +253,14 @@ class PtyShell:
         elif state == "transcribing":
             sys.stdout.buffer.write(b"\033]12;#00ffff\a\033[1 q")  # Cyan
         elif state == "thinking":
-            sys.stdout.buffer.write(b"\033]12;#ffff00\a\033[1 q")  # Yellow
-        elif state == "typing":
-            sys.stdout.buffer.write(b"\033]12;#00ff00\a\033[1 q")  # Green
+            sys.stdout.buffer.write(b"\033]12;#ffa500\a\033[3 q")  # Orange underline
+        elif state in ("typing", "speaking"):
+            sys.stdout.buffer.write(b"\033]12;#00ff00\a\033[4 q")  # Green underline
         else:
             sys.stdout.buffer.write(CURSOR_DEFAULT)
+
         sys.stdout.buffer.flush()
+        self._update_ui(state)
 
     def _notify(self, msg: str, color="36"):
         """Legacy text notify for verbose mode only."""
@@ -398,12 +400,12 @@ class PtyShell:
             indicator = idle_pulse[(self._anim_frame // 4) % len(idle_pulse)]
             text = "Idle"
         elif state == "listening_idle":
-            if self._last_energy == 0:
+            if getattr(self, "_last_energy", 0) == 0:
                 indicator = " ─ "
                 text = "Mute"
             else:
                 indicator = idle_pulse[(self._anim_frame // 4) % len(idle_pulse)]
-                text = "Idle"
+                text = "Listening"
         elif state == "listening_active":
             thr = getattr(self, "_last_threshold", getattr(self.config.stt, "vad_threshold", 1000))
             f = self._anim_frame % 4
