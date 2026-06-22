@@ -109,7 +109,7 @@ class VoiceInputThread(threading.Thread):
                             if text:
                                 # We have valid human speech! Lock the mic and show Processing.
                                 if getattr(self, "state_callback", None):
-                                    self.state_callback("transcribing")
+                                    self.state_callback("transcribing", text=text)
                                 self.stt_queue.put(text)
                             else:
                                 # False alarm (e.g. table bump, cough, fan noise).

@@ -15,6 +15,8 @@ from loguru import logger
 class ShellConfig:
     inner_shell: str = ""
     voice_on_start: bool = False
+    show_transcript: bool = True
+    show_state_text: bool = True
 
 
 @dataclass
@@ -250,6 +252,16 @@ def interactive_setup() -> None:
             default="speak_and_command",
         ).execute()
 
+    show_state_text = inquirer.confirm(
+        message="Show state labels (Idle/Listening/Processing) next to the animation?",
+        default=True,
+    ).execute()
+
+    show_transcript = inquirer.confirm(
+        message="Show live transcription on screen while processing?",
+        default=True,
+    ).execute()
+
     stt_provider = inquirer.select(
         message="Select the STT (Speech-to-Text) provider:",
         choices=[
@@ -390,7 +402,9 @@ def interactive_setup() -> None:
     lines = [
         "[shell]",
         f"inner_shell = {json.dumps(inner_shell)}",
-        f"voice_on_start = {'true' if voice_on_start else 'false'}",
+        f"voice_on_start = {str(voice_on_start).lower()}",
+        f"show_state_text = {str(show_state_text).lower()}",
+        f"show_transcript = {str(show_transcript).lower()}",
         "",
         "[keybinds]",
         f"toggle_listen = {json.dumps(keybind_data['name'])}",

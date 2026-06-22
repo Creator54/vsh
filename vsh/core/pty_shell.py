@@ -99,6 +99,8 @@ class PtyShell:
             if transcript is None:
                 break
 
+            self._current_transcript = transcript
+
             if self.verbose:
                 logger.info(f"Processing: {transcript}")
 
@@ -234,8 +236,10 @@ class PtyShell:
         if current != state:
             self._set_cursor_state(state)
 
-    def _set_cursor_state(self, state: str):
+    def _set_cursor_state(self, state: str, text: str = None):
         """Update terminal cursor color based on processing state to avoid terminal text pollution."""
+        if text is not None:
+            self._current_transcript = text
         if state in ("transcribing", "thinking", "typing", "speaking"):
             self._pipeline_state = state
             if hasattr(self, "voice_thread"):
@@ -260,7 +264,7 @@ class PtyShell:
             sys.stdout.buffer.write(CURSOR_DEFAULT)
 
         sys.stdout.buffer.flush()
-        self._update_ui(state)
+        self._render_ui()
 
     def _notify(self, msg: str, color="36"):
         """Legacy text notify for verbose mode only."""
@@ -381,7 +385,7 @@ class PtyShell:
 
         state = getattr(self, "_current_cursor_state", "idle")
 
-        # If the software toggle is entirely OFF, vsh goes to sleep.
+        # If the software toggle is entirely OFF, vsh goes to sleep visually.
         # Hide the UI completely so it behaves exactly like a normal shell.
         if not getattr(self, "is_listening", False):
             if self.cols > 16:
@@ -409,9 +413,9 @@ class PtyShell:
         elif state == "listening_active":
             thr = getattr(self, "_last_threshold", getattr(self.config.stt, "vad_threshold", 1000))
             f = self._anim_frame % 4
-            if self._last_energy > thr * 5:
+            if getattr(self, "_last_energy", 0) > thr * 5:
                 indicator = ["⠿⠶⠤", "⠶⠿⠶", "⠤⠶⠿", "⠶⠿⠶"][f]
-            elif self._last_energy > thr * 2.5:
+            elif getattr(self, "_last_energy", 0) > thr * 2.5:
                 indicator = ["⠶⠤⠤", "⠤⠶⠤", "⠤⠤⠶", "⠤⠶⠤"][f]
             else:
                 indicator = ["⠒⠤⠤", "⠤⠒⠤", "⠤⠤⠒", "⠤⠒⠤"][f]
@@ -425,13 +429,36 @@ class PtyShell:
 
         self._anim_frame += 1
 
+        show_text = getattr(self.config.shell, "show_state_text", True)
+
         if self.cols > 16:
-            # Format: indicator + space + text (padded to 10 chars)
-            display_text = f"{indicator} {text:<10}"
+            if show_text:
+                # Format: indicator + space + text (padded to 10 chars)
+                display_text = f"{indicator} {text:<10}"
+            else:
+                display_text = f"{indicator}"
+
+            transcript_display = ""
+            t = ""
+            if (
+                state in ("transcribing", "thinking")
+                and getattr(self.config.shell, "show_transcript", True)
+                and getattr(self, "_current_transcript", "")
+                and self.cols >= 40
+            ):
+                t = self._current_transcript.replace("\n", " ").replace("\r", "")
+                max_len = self.cols - len(display_text) - 6
+                if len(t) > max_len:
+                    t = t[: max_len - 3] + "..."
+                transcript_display = f"\033[90m{t}\033[0m "
 
             # \033[s saves cursor. \033[{col}G moves cursor to far right of current row. \033[K clears to end of line. \033[u restores cursor.
             color = "\033[36m" if state == "idle" else "\033[1;35m"  # Cyan for idle, Magenta for active
-            ui_str = f"\033[s\033[{self.cols - 15}G{color}{display_text}\033[0m\033[K\033[u"
+
+            # Position = cols - length of display_text - length of the raw transcript text (no ansi codes)
+            pos = max(1, self.cols - len(display_text) - 1 - (len(t) + 1 if transcript_display else 0))
+
+            ui_str = f"\033[s\033[{pos}G{transcript_display}{color}{display_text}\033[0m\033[K\033[u"
             sys.stdout.buffer.write(ui_str.encode())
             sys.stdout.buffer.flush()
 
