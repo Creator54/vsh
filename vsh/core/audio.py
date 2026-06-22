@@ -107,6 +107,7 @@ class MicStream:
         consecutive_speech = 0
         consecutive_silence = 0
         ui_is_listening = False
+        history = [False] * 5
 
         while True:
             if stop_check and stop_check():
@@ -142,13 +143,16 @@ class MicStream:
                     self._current_threshold = max(threshold, int(self._dynamic_noise_floor * 2.0))
 
             # UI Debounce & Hangover logic
+            history.append(energy > self._current_threshold)
+            history.pop(0)
+
             if energy == 0:
                 ui_is_listening = False
                 display_energy = 0
             else:
-                if consecutive_speech >= 3:
+                if sum(history) >= 3:
                     ui_is_listening = True
-                elif consecutive_silence >= 10:  # 1.0 second hangover to prevent flickering during pauses between words
+                elif consecutive_silence >= silence_limit:
                     ui_is_listening = False
 
                 if ui_is_listening:
@@ -173,7 +177,12 @@ class MicStream:
                 silent_chunks = 0
             else:
                 silent_chunks += 1
-                if (has_speech and silent_chunks > silence_limit) or (not has_speech and silent_chunks > timeout):
+                if has_speech and consecutive_silence >= silence_limit:
+                    # Break the moment the UI hangover drops, preventing 1.5s lag
+                    if verbose:
+                        sys.stderr.write("\r\033[K")  # Clear the diagnostic line
+                    break
+                elif not has_speech and silent_chunks > timeout:
                     if verbose:
                         sys.stderr.write("\r\033[K")  # Clear the diagnostic line
                     break
