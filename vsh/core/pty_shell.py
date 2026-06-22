@@ -108,17 +108,17 @@ class PtyShell:
                     mode = getattr(self.config.llm, "output_mode", "speak_and_command")
                     if mode == "command_only":
                         prompt = (
-                            "You are a shell assistant. Output ONLY the raw executable shell command. Do not use markdown formatting. Do not provide explanations.\n\nUser request: "
+                            "You are a shell assistant. Output ONLY the raw executable shell command. Do not use markdown formatting. Do not provide explanations or be verbose.\n\nUser request: "
                             + transcript
                         )
                     elif mode == "speak_only":
                         prompt = (
-                            "You are a shell assistant. Provide a conversational reply. Do not output executable commands.\n\nUser request: "
+                            "You are a shell assistant. Provide a highly concise conversational reply. Do not be verbose. Do not output executable commands.\n\nUser request: "
                             + transcript
                         )
                     else:
                         prompt = (
-                            "You are a shell assistant. Provide a brief conversational reply, and enclose the executable shell command inside a single ```bash code block.\n\nUser request: "
+                            "You are a shell assistant. Provide a highly concise conversational reply, and enclose the executable shell command inside a single ```bash code block. Do not be verbose.\n\nUser request: "
                             + transcript
                         )
 
