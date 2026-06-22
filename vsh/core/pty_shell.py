@@ -240,6 +240,10 @@ class PtyShell:
         """Update terminal cursor color based on processing state to avoid terminal text pollution."""
         if text is not None:
             self._current_transcript = text
+
+        if state not in ("transcribing", "thinking"):
+            self._current_transcript = ""
+
         if state in ("transcribing", "thinking", "typing", "speaking"):
             self._pipeline_state = state
             if hasattr(self, "voice_thread"):
@@ -389,7 +393,8 @@ class PtyShell:
         # Hide the UI completely so it behaves exactly like a normal shell.
         if not getattr(self, "is_listening", False):
             if self.cols > 16:
-                sys.stdout.buffer.write(f"\033[s\033[{self.cols - 15}G\033[K\033[u".encode())
+                last_pos = getattr(self, "_last_ui_pos", self.cols - 15)
+                sys.stdout.buffer.write(f"\033[s\033[{last_pos}G\033[K\033[u".encode())
                 sys.stdout.buffer.flush()
             return
 
@@ -409,7 +414,7 @@ class PtyShell:
                 text = "Mute"
             else:
                 indicator = idle_pulse[(self._anim_frame // 4) % len(idle_pulse)]
-                text = "Listening"
+                text = "Idle"
         elif state == "listening_active":
             thr = getattr(self, "_last_threshold", getattr(self.config.stt, "vad_threshold", 1000))
             f = self._anim_frame % 4
@@ -458,7 +463,14 @@ class PtyShell:
             # Position = cols - length of display_text - length of the raw transcript text (no ansi codes)
             pos = max(1, self.cols - len(display_text) - 1 - (len(t) + 1 if transcript_display else 0))
 
-            ui_str = f"\033[s\033[{pos}G{transcript_display}{color}{display_text}\033[0m\033[K\033[u"
+            last_pos = getattr(self, "_last_ui_pos", pos)
+            clear_str = ""
+            if pos > last_pos:
+                # The widget shrank (e.g. transcript disappeared). Clear the leftover text from its previous far-left position.
+                clear_str = f"\033[{last_pos}G\033[K"
+            self._last_ui_pos = pos
+
+            ui_str = f"\033[s{clear_str}\033[{pos}G{transcript_display}{color}{display_text}\033[0m\033[K\033[u"
             sys.stdout.buffer.write(ui_str.encode())
             sys.stdout.buffer.flush()
 
