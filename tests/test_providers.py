@@ -7,7 +7,7 @@ from vsh.providers.supertonic import SupertonicTTSProvider
 
 
 class TestProviders(unittest.TestCase):
-    @patch("vsh.providers.supertonic.TTS")
+    @patch("supertonic.TTS")
     def test_supertonic_tts_synthesis(self, mock_tts_class):
         mock_engine = MagicMock()
         mock_engine.get_voice_style.return_value = MagicMock()
