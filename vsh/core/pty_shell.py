@@ -70,7 +70,7 @@ class PtyShell:
         self.tts_queue = queue.Queue()
         self.voice_thread = VoiceInputThread(
             self.stt_queue,
-            provider_name=self.config.stt.provider,
+            config=self.config,
             device_index=self.config.stt.device_index,
             verbose=self.verbose,
             vad_threshold=self.config.stt.vad_threshold,
@@ -171,11 +171,11 @@ class PtyShell:
                 wav = self.tts_provider.synthesize(text)
                 # Convert to int16 bytes
                 data = (wav * 32767 * 0.9).astype("int16").tobytes()
-                from vsh.core.audio import AudioSignal
+                from vsh.core.audio import play_audio
 
                 # Use the configured device index for TTS if available
                 dev = self.config.tts.device_index if hasattr(self.config.tts, "device_index") else None
-                AudioSignal(data, 44100).play(device_index=dev)
+                play_audio(data, 44100, device_index=dev)
             except Exception as e:
                 logger.error(f"TTS Error: {e}")
             finally:
@@ -374,9 +374,6 @@ class PtyShell:
 
     def _render_ui(self):
         """Render the 3-character state indicator and text in the top-right corner."""
-
-        braille_spin = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
-        idle_pulse = [" • ", "(•)", "◖•◗", "(•)"]
 
         state = getattr(self, "_current_cursor_state", "idle")
 

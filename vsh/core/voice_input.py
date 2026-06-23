@@ -4,15 +4,12 @@ import time
 
 from loguru import logger
 
-from vsh.core.audio import MicStream
-from vsh.providers import STT_PROVIDERS
-
 
 class VoiceInputThread(threading.Thread):
     def __init__(
         self,
         stt_queue: queue.Queue,
-        provider_name: str = "vosk",
+        config=None,
         device_index=None,
         verbose=False,
         vad_threshold=1000,
@@ -23,7 +20,7 @@ class VoiceInputThread(threading.Thread):
         super().__init__(name="VoiceInputThread")
         self.daemon = False  # Ensure cleanup on exit
         self.stt_queue = stt_queue
-        self.provider_name = provider_name
+        self.config = config
         self.device_index = device_index
         self.verbose = verbose
         self.vad_threshold = vad_threshold
@@ -43,11 +40,15 @@ class VoiceInputThread(threading.Thread):
     def load_model(self):
         """Lazy load the STT model on first use."""
         if not self.model_loaded:
-            logger.info(f"Loading STT model ({self.provider_name})...")
-            if self.provider_name in STT_PROVIDERS:
-                self.stt_provider = STT_PROVIDERS[self.provider_name]()
-            else:
-                raise ValueError(f"Unknown STT provider: {self.provider_name}")
+            provider_name = self.config.stt.provider if self.config else "vosk"
+            logger.info(f"Loading STT model ({provider_name})...")
+            from vsh.core.config import VshConfig
+            from vsh.providers import resolve_stt
+
+            config_to_use = self.config if self.config else VshConfig()
+            self.stt_provider = resolve_stt(config_to_use)
+            if not self.stt_provider:
+                raise ValueError(f"Unknown STT provider: {provider_name}")
             self.model_loaded = True
             logger.info("STT model loaded.")
 
@@ -78,7 +79,7 @@ class VoiceInputThread(threading.Thread):
                 break
 
             try:
-                from vsh.core.audio import no_stderr
+                from vsh.core.audio import MicStream, no_stderr
 
                 with no_stderr(), MicStream(device_index=self.device_index) as stream:
                     # Inner loop for the active microphone session

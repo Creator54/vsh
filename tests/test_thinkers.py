@@ -5,10 +5,9 @@ import urllib.error
 from unittest.mock import MagicMock, patch
 
 from vsh.core.config import VshConfig
-from vsh.providers import THINKER_PROVIDERS, resolve_thinker
+from vsh.providers import resolve_thinker
 from vsh.providers.cli import CliThinker
 from vsh.providers.http import HttpThinker
-from vsh.providers.thinker import EchoThinker
 
 
 class TestResolveThinker(unittest.TestCase):
@@ -17,11 +16,15 @@ class TestResolveThinker(unittest.TestCase):
 
     def test_builtin_echo(self):
         thinker = resolve_thinker("echo", self.config)
-        self.assertIsInstance(thinker, EchoThinker)
+        self.assertIsInstance(thinker, CliThinker)
+        self.assertEqual(thinker.command, "echo You said: {}")
 
     def test_builtin_ollama(self):
         thinker = resolve_thinker("ollama", self.config)
-        self.assertIsInstance(thinker, THINKER_PROVIDERS["ollama"])
+        from vsh.providers.http import HttpThinker
+
+        self.assertIsInstance(thinker, HttpThinker)
+        self.assertEqual(thinker.format_spec["response_path"], "response")
 
     def test_raw_cli_fallback(self):
         thinker = resolve_thinker("echo hello", self.config)

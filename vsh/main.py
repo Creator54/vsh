@@ -1,16 +1,12 @@
 import os
 import sys
-import wave
 
 import typer
 from loguru import logger
-from vosk import SetLogLevel
 
-from vsh.core.audio import AudioSignal, MicStream
 from vsh.core.config import _get_config_path, interactive_setup, load_config
 from vsh.core.pty_shell import PtyShell
 from vsh.providers import resolve_stt, resolve_thinker, resolve_tts
-from vsh.providers.vosk import VoskSTTProvider
 
 STATE = {"v": False, "in": None, "out": None, "vad_thr": 1000, "vad_sil": 15, "model": "vosk-model-en-in-0.5"}
 
@@ -21,11 +17,11 @@ class NoSuchCommandShowsHelp(typer.core.TyperGroup):
     def get_command(self, ctx, cmd_name):
         command = super().get_command(ctx, cmd_name)
         if command is None:
-            import click
+            import sys
 
-            click.echo(f"Unknown command: '{cmd_name}'", err=True)
-            click.echo("\n" + ctx.get_help())
-            ctx.exit(0)
+            sys.stderr.write(f"Unknown command: '{cmd_name}'\n")
+            sys.stderr.write("\n" + ctx.get_help() + "\n")
+            sys.exit(0)
         return command
 
 
@@ -33,7 +29,12 @@ def setup_logger(v: bool):
     STATE["v"] = v
     logger.remove()
     logger.add(sys.stderr, level="INFO" if v else "ERROR", format="{message}")
-    SetLogLevel(-1)
+    try:
+        from vosk import SetLogLevel
+
+        SetLogLevel(-1)
+    except ImportError:
+        pass
 
 
 app = typer.Typer(
@@ -100,18 +101,23 @@ def stt(
     sys.stderr.write("[vsh] VSH STT active\n")
     stt_provider = resolve_stt(config)
     if not stt_provider:
+        from vsh.providers.vosk import VoskSTTProvider
+
         stt_provider = VoskSTTProvider(config.stt.model or STATE["model"])
     if file == "-":
         res = stt_provider.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
     elif file:
+        import wave
+
         with wave.open(file, "rb") as f:
-            sig = AudioSignal(f.readframes(f.getnframes()), f.getframerate(), f.getsampwidth())
-        res = stt_provider.transcribe_stream([sig.to_rate(16000).data])
+            data = f.readframes(f.getnframes())
+            rate = f.getframerate()
+        res = stt_provider.transcribe_stream([data], rate=rate)
     else:
         if STATE["v"]:
             sys.stderr.write("LISTENING\n")
             sys.stderr.flush()
-        from vsh.core.audio import no_stderr
+        from vsh.core.audio import MicStream, no_stderr
 
         with no_stderr(), MicStream(device_index=STATE["in"]) as s:
             res = stt_provider.transcribe_stream(
@@ -149,16 +155,17 @@ def tts(
         sys.stderr.flush()
     wav = tts_provider.synthesize(text)
     data = (wav * 32767 * 0.9).astype("int16").tobytes()
-    sig = AudioSignal(data, 44100)
+    from vsh.core.audio import play_audio, save_audio
+
     if save:
-        sig.save(save)
+        save_audio(save, data, 44100)
         logger.info(f"Saved: {save}")
     else:
         if stream:
-            sys.stdout.buffer.write(sig.data)
+            sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
         else:
-            sig.play(STATE["out"])
+            play_audio(data, 44100, device_index=STATE["out"])
 
 
 @app.command()

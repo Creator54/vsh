@@ -2,7 +2,6 @@ import warnings
 
 # ponytail: silence deprecation noise at source
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-import audioop  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import shutil  # noqa: E402
@@ -65,12 +64,10 @@ class VoskSTTProvider:
             logger.success("Model ready.")
 
     def transcribe_stream(self, audio_stream: Iterator[bytes], on_phrase=None, rate: int = 16000) -> str:
-        rec, res, st = KaldiRecognizer(self.model, 16000), [], None
+        rec, res = KaldiRecognizer(self.model, rate), []
         chunk_count = 0
         for chunk in audio_stream:
             chunk_count += 1
-            if rate != 16000:
-                chunk, st = audioop.ratecv(chunk, 2, 1, rate, 16000, st)
             if rec.AcceptWaveform(chunk):
                 t = json.loads(rec.Result()).get("text", "")
                 if t:

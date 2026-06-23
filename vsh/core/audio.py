@@ -2,7 +2,6 @@ import warnings
 
 # ponytail: silence deprecation noise at source
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-import audioop  # noqa: E402
 import contextlib  # noqa: E402
 import os  # noqa: E402
 import queue  # noqa: E402
@@ -29,33 +28,22 @@ def no_stderr():
                 os.dup2(saved.fileno(), fd)
 
 
-class AudioSignal:
-    def __init__(self, data: bytes, rate: int, width: int = 2):
-        self.data, self.rate, self.width = data, rate, width
+def play_audio(data: bytes, rate: int, width: int = 2, device_index=None):
+    with no_stderr():
+        pa = pyaudio.PyAudio()
+        s = pa.open(format=pyaudio.paInt16, channels=1, rate=rate, output=True, output_device_index=device_index)
+    s.write(data)
+    s.stop_stream()
+    s.close()
+    pa.terminate()
 
-    def to_rate(self, target: int):
-        if self.rate == target:
-            return self
-        d, _ = audioop.ratecv(self.data, self.width, 1, self.rate, target, None)
-        return AudioSignal(d, target, self.width)
 
-    def play(self, device_index=None):
-        with no_stderr():
-            pa = pyaudio.PyAudio()
-            s = pa.open(
-                format=pyaudio.paInt16, channels=1, rate=self.rate, output=True, output_device_index=device_index
-            )
-        s.write(self.data)
-        s.stop_stream()
-        s.close()
-        pa.terminate()
-
-    def save(self, p: str):
-        with wave.open(p, "wb") as f:
-            f.setnchannels(1)
-            f.setsampwidth(self.width)
-            f.setframerate(self.rate)
-            f.writeframes(self.data)
+def save_audio(p: str, data: bytes, rate: int, width: int = 2):
+    with wave.open(p, "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(width)
+        f.setframerate(rate)
+        f.writeframes(data)
 
 
 class MicStream:
