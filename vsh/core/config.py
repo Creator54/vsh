@@ -139,38 +139,47 @@ def capture_keybind():
     return {"name": f"custom ({hex_repr})", "triggers": [hex_repr], "bash": None, "zsh": None, "fish": None}
 
 
-def update_shell_rc_bind(rc_file: str, keybind_data: dict) -> bool:
+def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: bool) -> bool:
     import re
 
     rc_path = Path(rc_file).expanduser()
     is_zsh = "zsh" in rc_file
     is_fish = "fish" in rc_file
 
-    name = keybind_data["name"]
     append_cmd = ""
+    if keybind_data:
+        name = keybind_data["name"]
+        if is_zsh:
+            b = keybind_data.get("zsh")
+            if not b:
+                sys.stdout.write(f"\nWarning: Could not auto-generate zsh binding for {name}.\n")
+                return False
+            append_cmd += f"bindkey -s '{b}' 'vsh --voice\\n'\n"
+        elif is_fish:
+            b = keybind_data.get("fish")
+            if not b:
+                sys.stdout.write(f"\nWarning: Could not auto-generate fish binding for {name}.\n")
+                return False
+            append_cmd += f"bind {b} 'vsh --voice; commandline -f repaint'\n"
+        else:
+            b = keybind_data.get("bash")
+            if not b:
+                sys.stdout.write(f"\nWarning: Could not auto-generate bash binding for {name}.\n")
+                return False
+            append_cmd += f'bind \'"{b}":"vsh --voice\\n"\'\n'
 
-    if is_zsh:
-        b = keybind_data.get("zsh")
-        if not b:
-            sys.stdout.write(f"\nWarning: Could not auto-generate zsh binding for {name}.\n")
-            return False
-        append_cmd = f"bindkey -s '{b}' 'vsh --voice\\n'"
-    elif is_fish:
-        b = keybind_data.get("fish")
-        if not b:
-            sys.stdout.write(f"\nWarning: Could not auto-generate fish binding for {name}.\n")
-            return False
-        append_cmd = f"bind {b} 'vsh --voice; commandline -f repaint'"
-    else:
-        b = keybind_data.get("bash")
-        if not b:
-            sys.stdout.write(f"\nWarning: Could not auto-generate bash binding for {name}.\n")
-            return False
-        append_cmd = f'bind \'"{b}":"vsh --voice\\n"\''
+    if set_default:
+        if is_fish:
+            append_cmd += "if not set -q VSH_ACTIVE; and isatty 1\n    exec vsh\nend\n"
+        else:
+            append_cmd += 'if [ -z "$VSH_ACTIVE" ] && [ -t 1 ]; then\n    exec vsh\nfi\n'
+
+    if not append_cmd:
+        return True
 
     block_start = "# --- vsh configuration start ---"
     block_end = "# --- vsh configuration end ---"
-    block = f"\n{block_start}\n{append_cmd}\n{block_end}\n"
+    block = f"\n{block_start}\n{append_cmd}{block_end}\n"
 
     try:
         content = ""
@@ -184,7 +193,10 @@ def update_shell_rc_bind(rc_file: str, keybind_data: dict) -> bool:
             new_content = content.rstrip() + block
 
         rc_path.write_text(new_content)
-        sys.stdout.write(f"\nAdded shortcut {name} to {rc_file}!\n")
+        if keybind_data:
+            sys.stdout.write(f"\nAdded shortcut {keybind_data['name']} to {rc_file}!\n")
+        if set_default:
+            sys.stdout.write(f"\nSet vsh as default shell in {rc_file}!\n")
         return True
     except Exception as e:
         sys.stdout.write(f"\nFailed to write shortcut: {e}\n")
@@ -373,7 +385,9 @@ def interactive_setup() -> None:
         message="Add a global shell shortcut to launch vsh on demand?", default=True
     ).execute()
 
-    if add_shortcut:
+    set_default = inquirer.confirm(message="Set vsh as your default interactive shell?", default=False).execute()
+
+    if add_shortcut or set_default:
         if "fish" in inner_shell or "fish" in default_shell:
             default_rc = "~/.config/fish/config.fish"
         elif "zsh" in inner_shell or "zsh" in default_shell:
@@ -381,8 +395,8 @@ def interactive_setup() -> None:
         else:
             default_rc = "~/.bashrc"
 
-        rc_file = inquirer.text(message="Shell config file:", default=default_rc).execute()
-        update_shell_rc_bind(rc_file, keybind_data)
+        rc_file = inquirer.text(message="Shell config file to update:", default=default_rc).execute()
+        update_shell_rc_bind(rc_file, keybind_data if add_shortcut else None, set_default)
 
     import json
 
