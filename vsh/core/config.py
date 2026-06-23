@@ -1,4 +1,3 @@
-import contextlib
 import os
 import sys
 import tomllib
@@ -59,20 +58,10 @@ def _get_config_path() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "vsh" / "config.toml"
 
 
-@contextlib.contextmanager
-def no_alsa_errors():
-    with open(os.devnull, "w") as devnull:
-        old_stderr = os.dup(sys.stderr.fileno())
-        os.dup2(devnull.fileno(), sys.stderr.fileno())
-        try:
-            yield
-        finally:
-            os.dup2(old_stderr, sys.stderr.fileno())
-            os.close(old_stderr)
-
-
 def get_audio_devices():
-    with no_alsa_errors():
+    from vsh.core.audio import no_stderr
+
+    with no_stderr():
         try:
             p = pyaudio.PyAudio()
             devices = []

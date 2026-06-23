@@ -2,30 +2,13 @@ import json
 import subprocess
 import unittest
 import urllib.error
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from vsh.core.config import VshConfig
 from vsh.providers import THINKER_PROVIDERS, resolve_thinker
 from vsh.providers.cli import CliThinker
 from vsh.providers.http import HttpThinker
 from vsh.providers.thinker import EchoThinker
-
-
-class FakeHTTPResponse:
-    """Fake urllib response for mocking."""
-
-    def __init__(self, body: bytes):
-        self._body = body
-        self.status = 200
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        pass
 
 
 class TestResolveThinker(unittest.TestCase):
@@ -74,7 +57,10 @@ class TestResolveThinker(unittest.TestCase):
 
 class TestHttpThinker(unittest.TestCase):
     def _mock_urlopen(self, response_body: dict):
-        resp = FakeHTTPResponse(json.dumps(response_body).encode("utf-8"))
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(response_body).encode("utf-8")
+        resp.status = 200
+        resp.__enter__.return_value = resp
         return patch("urllib.request.urlopen", return_value=resp)
 
     def _capture_request(self):
@@ -82,7 +68,10 @@ class TestHttpThinker(unittest.TestCase):
 
         def fake_urlopen(req, **_):
             captured["req"] = req
-            return FakeHTTPResponse(json.dumps({"choices": [{"message": {"content": "hi"}}]}).encode("utf-8"))
+            resp = MagicMock()
+            resp.read.return_value = json.dumps({"choices": [{"message": {"content": "hi"}}]}).encode("utf-8")
+            resp.__enter__.return_value = resp
+            return resp
 
         return patch("urllib.request.urlopen", side_effect=fake_urlopen), captured
 

@@ -1,9 +1,7 @@
 import shlex
 
-from vsh.core.provider import Thinker
 
-
-class EchoThinker(Thinker):
+class EchoThinker:
     """Simple thinker that echoes back with a prefix."""
 
     def ask(self, prompt: str) -> str:

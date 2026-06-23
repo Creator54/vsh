@@ -1,5 +1,4 @@
 from vsh.core.config import VshConfig
-from vsh.core.provider import Thinker
 from vsh.providers.cli import CliThinker
 from vsh.providers.http import HttpThinker
 from vsh.providers.http_audio import HttpSTTProvider, HttpTTSProvider
@@ -45,7 +44,7 @@ THINKER_PROVIDERS = {
 }
 
 
-def resolve_thinker(name: str, config: VshConfig) -> Thinker:
+def resolve_thinker(name: str, config: VshConfig):
     """Resolve a thinker by name with three-tier fallback.
 
     1. Built-in registry (echo, ollama)

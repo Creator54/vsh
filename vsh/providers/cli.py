@@ -1,10 +1,8 @@
 import shlex
 import subprocess
 
-from vsh.core.provider import Thinker
 
-
-class CliThinker(Thinker):
+class CliThinker:
     """Subprocess-based thinker that runs any CLI command with the prompt as stdin."""
 
     def __init__(self, command: str, **kwargs):

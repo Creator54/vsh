@@ -3,10 +3,8 @@ import shlex
 import urllib.error
 import urllib.request
 
-from vsh.core.provider import Thinker
 
-
-class OllamaThinker(Thinker):
+class OllamaThinker:
     """Local LLM via Ollama. Passes the user's transcript through without prompt engineering."""
 
     def __init__(self, model: str = "llama3", endpoint: str = "http://localhost:11434/api/generate"):

@@ -5,10 +5,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from vsh.core.provider import Thinker
 
-
-class HttpThinker(Thinker):
+class HttpThinker:
     """HTTP API-based thinker supporting OpenAI-compatible, Ollama, Anthropic, and Gemini formats."""
 
     FORMATS = {

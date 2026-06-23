@@ -1,4 +1,3 @@
-import contextlib
 import os
 import sys
 import wave
@@ -30,41 +29,11 @@ class NoSuchCommandShowsHelp(typer.core.TyperGroup):
         return command
 
 
-@contextlib.contextmanager
-def no_stderr():
-    with open(os.devnull, "w") as f, contextlib.redirect_stderr(f):
-        yield
-
-
 def setup_logger(v: bool):
     STATE["v"] = v
     logger.remove()
-    logger.add(sys.stderr, level="INFO" if v else "ERROR", format="<cyan>[vsh]</cyan> {message}")
+    logger.add(sys.stderr, level="INFO" if v else "ERROR", format="{message}")
     SetLogLevel(-1)
-
-
-class LocalSpeech:
-    def __init__(self, stt, tts):
-        self.stt, self.tts = stt, tts
-
-    def listen(self, on_phrase=None):
-        if STATE["v"]:
-            sys.stderr.write("[vsh] LISTENING\n")
-            sys.stderr.flush()
-        with MicStream(device_index=STATE["in"]) as s:
-            return self.stt.transcribe_stream(
-                s.live_gen(threshold=STATE["vad_thr"], silence_limit=STATE["vad_sil"], verbose=STATE["v"]),
-                on_phrase=on_phrase,
-            )
-
-    def say(self, text):
-        if text:
-            if STATE["v"]:
-                sys.stderr.write("[vsh] SPEAKING\n")
-                sys.stderr.flush()
-            wav = self.tts.synthesize(text)
-            data = (wav * 32767 * 0.9).astype("int16").tobytes()
-            AudioSignal(data, 44100).play(STATE["out"])
 
 
 app = typer.Typer(
@@ -132,17 +101,22 @@ def stt(
     stt_provider = resolve_stt(config)
     if not stt_provider:
         stt_provider = VoskSTTProvider(config.stt.model or STATE["model"])
-    with no_stderr():
-        e = LocalSpeech(stt_provider, None)
-
     if file == "-":
-        res = e.stt.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
+        res = stt_provider.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
     elif file:
         with wave.open(file, "rb") as f:
             sig = AudioSignal(f.readframes(f.getnframes()), f.getframerate(), f.getsampwidth())
-        res = e.stt.transcribe_stream([sig.to_rate(16000).data])
+        res = stt_provider.transcribe_stream([sig.to_rate(16000).data])
     else:
-        res = e.listen()
+        if STATE["v"]:
+            sys.stderr.write("LISTENING\n")
+            sys.stderr.flush()
+        from vsh.core.audio import no_stderr
+
+        with no_stderr(), MicStream(device_index=STATE["in"]) as s:
+            res = stt_provider.transcribe_stream(
+                s.live_gen(threshold=STATE["vad_thr"], silence_limit=STATE["vad_sil"], verbose=STATE["v"])
+            )
     if res:
         print(res)
 
@@ -160,7 +134,8 @@ def tts(
         logger.error("No input")
         raise typer.Exit(code=1)
 
-    sys.stderr.write("[vsh] VSH TTS active\n")
+    from vsh.core.audio import no_stderr
+
     with no_stderr():
         tts_provider = resolve_tts(config)
         if not tts_provider:
@@ -168,9 +143,11 @@ def tts(
             from vsh.providers.supertonic import SupertonicTTSProvider
 
             tts_provider = SupertonicTTSProvider(voice="F1")
-        e = LocalSpeech(None, tts_provider)
 
-    wav = e.tts.synthesize(text)
+    if STATE["v"]:
+        sys.stderr.write("SPEAKING\n")
+        sys.stderr.flush()
+    wav = tts_provider.synthesize(text)
     data = (wav * 32767 * 0.9).astype("int16").tobytes()
     sig = AudioSignal(data, 44100)
     if save:

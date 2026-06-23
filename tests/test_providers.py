@@ -3,22 +3,10 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from vsh.main import LocalSpeech
 from vsh.providers.supertonic import SupertonicTTSProvider
-from vsh.providers.vosk import VoskSTTProvider
 
 
 class TestProviders(unittest.TestCase):
-    @patch("vsh.providers.vosk.Model")
-    @patch("vsh.providers.vosk.KaldiRecognizer")
-    @patch("vsh.providers.vosk.VoskSTTProvider._ensure_model")
-    def test_engine_init(self, mock_ensure, mock_recognizer, mock_model):
-        stt = VoskSTTProvider()
-        tts = MagicMock()
-        engine = LocalSpeech(stt, tts)
-        self.assertIsNotNone(engine.stt)
-        self.assertIsNotNone(engine.tts)
-
     @patch("vsh.providers.supertonic.TTS")
     def test_supertonic_tts_synthesis(self, mock_tts_class):
         mock_engine = MagicMock()

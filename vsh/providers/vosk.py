@@ -13,10 +13,8 @@ from pathlib import Path  # noqa: E402
 from loguru import logger  # noqa: E402
 from vosk import KaldiRecognizer, Model  # noqa: E402
 
-from vsh.core.provider import STTProvider  # noqa: E402
 
-
-class VoskSTTProvider(STTProvider):
+class VoskSTTProvider:
     """Vosk Offline Speech-to-Text provider."""
 
     DEFAULT_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-en-in-0.5.zip"
@@ -30,8 +28,6 @@ class VoskSTTProvider(STTProvider):
 
         self._ensure_model(model_path, self.model_url)
         self.model = Model(model_path)
-        self.sample_rate = 16000
-        self.recognizer = KaldiRecognizer(self.model, self.sample_rate)
 
     def _ensure_model(self, model_path: str, model_url: str):
         if not os.path.exists(model_path):
@@ -98,7 +94,3 @@ class VoskSTTProvider(STTProvider):
             if on_phrase:
                 on_phrase(f)
         return " ".join(filter(None, res))
-
-    def transcribe_file(self, file_path: str) -> str:
-        with open(file_path, "rb") as f:
-            return self.transcribe_stream(iter(lambda: f.read(4000), b""))

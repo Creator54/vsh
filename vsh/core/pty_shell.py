@@ -14,16 +14,14 @@ import tty
 from loguru import logger
 
 from vsh.core.config import VshConfig
-from vsh.core.provider import Thinker
 from vsh.core.voice_input import VoiceInputThread
 
 # ANSI escape sequences for cursor control and terminal title
 CURSOR_DEFAULT = b"\033]112\a\033[0 q\033]0;vsh\a"
-CURSOR_RED_BLINK = b"\033]12;#ff00ff\a\033[1 q\033]0;vsh [LISTENING]\a"
 
 
 class PtyShell:
-    def __init__(self, config: VshConfig, thinker: Thinker = None, verbose: bool = False, tts_provider=None):
+    def __init__(self, config: VshConfig, thinker=None, verbose: bool = False, tts_provider=None):
         self.config = config
         self.thinker = thinker
         self.verbose = verbose
@@ -68,7 +66,6 @@ class PtyShell:
         )
 
         self.master_fd = None
-        self.slave_fd = None
         self.stt_queue = queue.Queue()
         self.tts_queue = queue.Queue()
         self.voice_thread = VoiceInputThread(
@@ -90,7 +87,6 @@ class PtyShell:
         self.rows = 24
         self._last_energy = 0
         self._anim_frame = 0
-        self._last_key_press_time = 0.0
 
     def _pipeline_worker(self):
         """Background worker to handle thinking and coordination without blocking the shell."""
@@ -273,9 +269,6 @@ class PtyShell:
         if self.verbose:
             sys.stdout.buffer.write(f"\r\n\033[{color}m[vsh]\033[0m {msg}\r\n".encode())
             sys.stdout.buffer.flush()
-
-    def _clear_notify(self):
-        pass
 
     def _toggle_listening(self):
         self.is_listening = self.voice_thread.toggle_listening()
@@ -505,9 +498,7 @@ class PtyShell:
                 logger.info("Interrupted by signal")
                 break
 
-            # 1. Process keyboard input
             if sys.stdin.fileno() in ready_r:
-                self._last_key_press_time = time.time()
                 try:
                     data = os.read(sys.stdin.fileno(), 1024)
                 except OSError:

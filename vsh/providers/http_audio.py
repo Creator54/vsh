@@ -9,10 +9,9 @@ import numpy as np
 from loguru import logger
 
 from vsh.core.config import ProviderConfig
-from vsh.core.provider import STTProvider, TTSProvider
 
 
-class HttpSTTProvider(STTProvider):
+class HttpSTTProvider:
     """HTTP-based Speech-to-Text Provider (Whisper, Gemini, Sarvam, etc.)."""
 
     def __init__(self, config: ProviderConfig):
@@ -99,12 +98,8 @@ class HttpSTTProvider(STTProvider):
                 logger.error(f"Response: {e.read().decode('utf-8')}")
             return ""
 
-    def transcribe_file(self, file_path: str) -> str:
-        with open(file_path, "rb") as f:
-            return self.transcribe_stream(iter(lambda: f.read(4000), b""))
 
-
-class HttpTTSProvider(TTSProvider):
+class HttpTTSProvider:
     """HTTP-based Text-to-Speech Provider."""
 
     def __init__(self, config: ProviderConfig):
