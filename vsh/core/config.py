@@ -268,8 +268,9 @@ def interactive_setup() -> None:
         choices=[
             Choice("vosk", "Vosk (Local, Offline, Fast)"),
             Choice("groq", "Groq Whisper (Cloud, Insanely Fast, Free)"),
+            Choice("sarvam", "Sarvam AI (Cloud, Indian Languages)"),
             Choice("gcp", "Google Cloud STT (Cloud, High Accuracy)"),
-            Choice("http", "Custom API (OpenAI, Gemini, Sarvam, etc.)"),
+            Choice("http", "Custom API (OpenAI, Gemini, etc.)"),
         ],
         default="vosk",
     ).execute()
@@ -309,7 +310,9 @@ def interactive_setup() -> None:
             vosk_model_url = "https://alphacephei.com/vosk/models/vosk-model-en-in-0.5.zip"
 
     stt_http = {}
-    if stt_provider == "groq":
+    if stt_provider == "sarvam":
+        stt_http["api_key_env"] = inquirer.text(message="Sarvam API Key Env Var:", default="SARVAM_API_KEY").execute()
+    elif stt_provider == "groq":
         stt_http["endpoint"] = "https://api.groq.com/openai/v1/audio/transcriptions"
         stt_http["api_key_env"] = inquirer.text(message="Groq API Key Env Var:", default="GROQ_API_KEY").execute()
         stt_http["format"] = "openai_whisper"
@@ -324,7 +327,6 @@ def interactive_setup() -> None:
             choices=[
                 Choice("openai_whisper", "OpenAI Whisper"),
                 Choice("gemini", "Gemini Base64"),
-                Choice("sarvam", "Sarvam"),
             ],
             default="openai_whisper",
         ).execute()
@@ -335,14 +337,29 @@ def interactive_setup() -> None:
         choices=[
             Choice("supertonic", "Supertonic (Local, Offline)"),
             Choice("polly", "AWS Polly (Cloud, Fast)"),
-            Choice("http", "Cloud API (OpenAI TTS, ElevenLabs, Sarvam, etc.)"),
+            Choice("sarvam", "Sarvam AI (Cloud, Indian Languages)"),
+            Choice("http", "Cloud API (OpenAI TTS, ElevenLabs, etc.)"),
             Choice("none", "None (Disable Voice Output)"),
         ],
         default="supertonic",
     ).execute()
 
     tts_http = {}
-    if tts_provider == "http":
+    if tts_provider == "sarvam":
+        tts_http["api_key_env"] = inquirer.text(message="Sarvam API Key Env Var:", default="SARVAM_API_KEY").execute()
+        tts_http["model"] = inquirer.select(
+            message="Sarvam Voice:",
+            choices=[
+                Choice("priya", "Priya (Female)"),
+                Choice("aditya", "Aditya (Male)"),
+                Choice("ritu", "Ritu (Female)"),
+                Choice("amit", "Amit (Male)"),
+                Choice("neha", "Neha (Female)"),
+                Choice("rahul", "Rahul (Male)"),
+            ],
+            default="priya",
+        ).execute()
+    elif tts_provider == "http":
         tts_http["endpoint"] = inquirer.text(
             message="TTS API Endpoint:", default="https://api.openai.com/v1/audio/speech"
         ).execute()
@@ -352,7 +369,6 @@ def interactive_setup() -> None:
             choices=[
                 Choice("openai_tts", "OpenAI TTS"),
                 Choice("elevenlabs", "ElevenLabs"),
-                Choice("sarvam", "Sarvam"),
             ],
             default="openai_tts",
         ).execute()
@@ -445,6 +461,9 @@ def interactive_setup() -> None:
                 f"model = {json.dumps(stt_http['model'])}",
             ]
         )
+    elif stt_provider == "sarvam":
+        lines.extend(['provider = "sarvam"'])
+        lines.extend([f"api_key_env = {json.dumps(stt_http['api_key_env'])}"])
     elif stt_provider == "vosk":
         lines.extend(['provider = "vosk"'])
         if vosk_model_name:
@@ -469,6 +488,11 @@ def interactive_setup() -> None:
                 f"model = {json.dumps(tts_http['model'])}",
             ]
         )
+    elif tts_provider == "sarvam":
+        lines.extend(['provider = "sarvam"'])
+        lines.extend([f"api_key_env = {json.dumps(tts_http['api_key_env'])}"])
+        if "model" in tts_http:
+            lines.extend([f"model = {json.dumps(tts_http['model'])}"])
     elif tts_provider == "polly":
         lines.extend(['provider = "polly"'])
         if "model" in tts_http:

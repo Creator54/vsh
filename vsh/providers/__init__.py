@@ -2,6 +2,7 @@ from vsh.core.config import VshConfig
 from vsh.providers.gcp_stt import GcpSTTProvider
 from vsh.providers.http_audio import HttpSTTProvider, HttpTTSProvider
 from vsh.providers.polly import AwsPollyTTSProvider
+from vsh.providers.sarvam import SarvamSTTProvider, SarvamTTSProvider
 from vsh.providers.supertonic import SupertonicTTSProvider
 from vsh.providers.vosk import VoskSTTProvider
 
@@ -9,12 +10,14 @@ _STT_REGISTRY = {
     "custom_http": lambda c: HttpSTTProvider(c.stt),
     "vosk": lambda c: VoskSTTProvider(model_name=c.stt.model, model_url=c.stt.url),
     "gcp": lambda c: GcpSTTProvider(language_code=getattr(c.stt, "model", "en-US") or "en-US"),
+    "sarvam": lambda c: SarvamSTTProvider(c.stt),
 }
 
 _TTS_REGISTRY = {
     "custom_http": lambda c: HttpTTSProvider(c.tts),
     "supertonic": lambda c: SupertonicTTSProvider(),
     "polly": lambda c: AwsPollyTTSProvider(voice=getattr(c.tts, "model", "Matthew") or "Matthew"),
+    "sarvam": lambda c: SarvamTTSProvider(c.tts),
 }
 
 
