@@ -214,7 +214,8 @@ def wrap(ctx: typer.Context):
 
     # We disable the internal LLM when wrapping an external one to avoid double-processing
     thinker = None
-    tts_provider = resolve_tts(config)
+    # We also disable TTS since direct injection mode doesn't synthesize speech
+    tts_provider = None
 
     pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
     try:
