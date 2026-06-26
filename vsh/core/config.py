@@ -267,8 +267,9 @@ def interactive_setup() -> None:
         message="Speech-to-Text (STT) provider:",
         choices=[
             Choice("vosk", "Vosk (Local, Offline, Fast)"),
+            Choice("groq", "Groq Whisper (Cloud, Insanely Fast, Free)"),
             Choice("gcp", "Google Cloud STT (Cloud, High Accuracy)"),
-            Choice("http", "Cloud API (Whisper, Gemini, Sarvam, etc.)"),
+            Choice("http", "Custom API (OpenAI, Gemini, Sarvam, etc.)"),
         ],
         default="vosk",
     ).execute()
@@ -308,7 +309,12 @@ def interactive_setup() -> None:
             vosk_model_url = "https://alphacephei.com/vosk/models/vosk-model-en-in-0.5.zip"
 
     stt_http = {}
-    if stt_provider == "http":
+    if stt_provider == "groq":
+        stt_http["endpoint"] = "https://api.groq.com/openai/v1/audio/transcriptions"
+        stt_http["api_key_env"] = inquirer.text(message="Groq API Key Env Var:", default="GROQ_API_KEY").execute()
+        stt_http["format"] = "openai_whisper"
+        stt_http["model"] = "whisper-large-v3"
+    elif stt_provider == "http":
         stt_http["endpoint"] = inquirer.text(
             message="STT API Endpoint:", default="https://api.openai.com/v1/audio/transcriptions"
         ).execute()
@@ -428,7 +434,7 @@ def interactive_setup() -> None:
         "[stt]",
     ]
 
-    if stt_provider == "http":
+    if stt_provider in ("http", "groq"):
         lines.extend(['provider = "custom_http"', "", "[stt.custom_http]"])
         lines.extend(
             [
@@ -520,6 +526,15 @@ def interactive_setup() -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text("\n".join(lines) + "\n")
     sys.stdout.write(f"\nConfig saved to {config_path}\n\n")
+
+    if stt_provider == "groq" and not os.environ.get("GROQ_API_KEY"):
+        sys.stdout.write("⚠️  Reminder: You need to export GROQ_API_KEY in your shell (e.g., in ~/.bashrc)\n")
+    if stt_provider == "gcp" and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        sys.stdout.write("⚠️  Reminder: GCP STT requires GOOGLE_APPLICATION_CREDENTIALS to be set.\n")
+    if tts_provider == "polly" and not (os.environ.get("AWS_PROFILE") or os.environ.get("AWS_ACCESS_KEY_ID")):
+        sys.stdout.write(
+            "⚠️  Reminder: AWS Polly requires standard AWS credentials (AWS_PROFILE or ~/.aws/credentials)\n"
+        )
 
 
 def load_config() -> VshConfig:
