@@ -188,14 +188,9 @@ def tts(
 
 
 @app.command()
-def setup():
+def setup(section: str = typer.Argument(None, help="Specific section to configure (e.g. llm, stt, tts, keybind)")):
     """Run the interactive configuration wizard."""
-    if _get_config_path().exists():
-        overwrite = input("Config already exists. Overwrite? [y/N]: ").strip().lower()
-        if overwrite not in ("y", "yes"):
-            sys.stdout.write("Aborted.\n")
-            return
-    interactive_setup()
+    interactive_setup(section=section)
 
 
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -229,7 +224,7 @@ def bind():
     """Interactively setup a new keybind and update shell config."""
     import json
 
-    from vsh.core.config import _get_config_path, capture_keybind, update_shell_rc_bind
+    from vsh.core.config import capture_keybind, update_shell_rc_bind
 
     sys.stdout.write("Keybind Setup Wizard\n")
 
