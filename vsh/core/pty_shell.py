@@ -64,6 +64,7 @@ class PtyShell:
             or shutil.which("sh")
             or "/bin/sh"
         )
+        self.inner_shell_args = getattr(config.shell, "inner_shell_args", [self.inner_shell])
 
         self.master_fd = None
         self.stt_queue = queue.Queue()
@@ -311,7 +312,7 @@ class PtyShell:
         if pid == 0:
             # Child process: execute the shell
             try:
-                os.execv(self.inner_shell, [self.inner_shell])
+                os.execv(self.inner_shell, self.inner_shell_args)
             except Exception as e:
                 sys.stderr.write(f"[vsh] Failed to start shell: {self.inner_shell}: {e}\n")
                 os._exit(1)

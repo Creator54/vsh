@@ -198,6 +198,31 @@ def setup():
     interactive_setup()
 
 
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def wrap(ctx: typer.Context):
+    """Wrap a specific command/LLM inside vsh (e.g. vsh wrap aichat)."""
+    if not ctx.args:
+        logger.error("No command provided. Usage: vsh wrap <command>")
+        raise typer.Exit(code=1)
+
+    config = load_config()
+    import shlex
+
+    # Execute the command inside the user's default shell
+    config.shell.inner_shell = os.environ.get("SHELL") or "/bin/bash"
+    config.shell.inner_shell_args = [config.shell.inner_shell, "-c", shlex.join(ctx.args)]
+
+    # We disable the internal LLM when wrapping an external one to avoid double-processing
+    thinker = None
+    tts_provider = resolve_tts(config)
+
+    pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
+    try:
+        pty_shell.run()
+    except Exception as e:
+        logger.error(f"Shell crashed: {e}")
+
+
 @app.command()
 def bind():
     """Interactively setup a new keybind and update shell config."""
