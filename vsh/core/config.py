@@ -435,7 +435,7 @@ def interactive_setup() -> None:
     ]
 
     if stt_provider in ("http", "groq"):
-        lines.extend(['provider = "custom_http"', "", "[stt.custom_http]"])
+        lines.extend(['provider = "custom_http"'])
         lines.extend(
             [
                 'type = "http"',
@@ -459,7 +459,7 @@ def interactive_setup() -> None:
     lines.extend(["", "[tts]"])
 
     if tts_provider == "http":
-        lines.extend(['provider = "custom_http"', "", "[tts.custom_http]"])
+        lines.extend(['provider = "custom_http"'])
         lines.extend(
             [
                 'type = "http"',
@@ -564,6 +564,11 @@ def load_config() -> VshConfig:
         for profile in cfg.custom_thinkers.values():
             if "api_key_env" in profile:
                 profile["api_key"] = os.environ.get(profile["api_key_env"], "")
+
+        # Resolve api_key_env for core providers
+        for block in (cfg.stt, cfg.tts, cfg.llm):
+            if block.api_key_env and not block.api_key:
+                block.api_key = os.environ.get(block.api_key_env, "")
 
     # Environment overrides
     if "VSH_SHELL" in os.environ:
