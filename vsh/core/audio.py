@@ -99,12 +99,14 @@ class MicStream:
 
         while True:
             if stop_check and stop_check():
+                self.last_capture_had_speech = has_speech
                 break
             try:
                 chunk = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
             if chunk is None:
+                self.last_capture_had_speech = has_speech
                 break
             yield chunk
 
@@ -169,10 +171,12 @@ class MicStream:
                     # Break the moment the UI hangover drops, preventing 1.5s lag
                     if verbose:
                         sys.stderr.write("\r\033[K")  # Clear the diagnostic line
+                    self.last_capture_had_speech = has_speech
                     break
                 elif not has_speech and silent_chunks > timeout:
                     if verbose:
                         sys.stderr.write("\r\033[K")  # Clear the diagnostic line
+                    self.last_capture_had_speech = has_speech
                     break
 
 

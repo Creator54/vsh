@@ -99,7 +99,7 @@ class VoiceInputThread(threading.Thread):
                             )
                         )
 
-                        if audio_chunks and self.is_listening:
+                        if audio_chunks and self.is_listening and getattr(stream, "last_capture_had_speech", False):
                             # Log phrase capture
                             if self.verbose:
                                 logger.info(f"Captured phrase: {len(audio_chunks)} chunks")
