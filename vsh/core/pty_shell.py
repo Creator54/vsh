@@ -290,7 +290,11 @@ class PtyShell:
         """Inject text directly into the PTY."""
         if not cmd:
             return
-        # We don't append newline! The user types Enter themselves.
+
+        # Append newline if auto_submit is enabled (e.g. for conversational LLM chat CLI)
+        if getattr(self.config.shell, "auto_submit", False) and not cmd.endswith("\n"):
+            cmd += "\n"
+
         try:
             os.write(self.master_fd, cmd.encode())
         except OSError as e:

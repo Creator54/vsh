@@ -14,8 +14,9 @@ from loguru import logger
 class ShellConfig:
     inner_shell: str = ""
     voice_on_start: bool = False
-    show_transcript: bool = True
     show_state_text: bool = True
+    show_transcript: bool = True
+    auto_submit: bool = False
 
 
 @dataclass
@@ -242,6 +243,8 @@ def interactive_setup() -> None:
         cli_cmd = inquirer.text(message="CLI Command:", default='codex exec "{}"').execute()
 
     output_mode = "speak_and_command"
+    auto_submit = False
+
     if thinker != "none":
         output_mode = inquirer.select(
             message="How should the LLM respond?",
@@ -251,6 +254,11 @@ def interactive_setup() -> None:
                 Choice("speak_only", "Conversation only (No terminal injection)"),
             ],
             default="speak_and_command",
+        ).execute()
+
+        auto_submit = inquirer.confirm(
+            message="Auto-submit the LLM's commands? (Warning: skips manual review)",
+            default=False,
         ).execute()
 
     show_state_text = inquirer.confirm(
@@ -442,6 +450,7 @@ def interactive_setup() -> None:
         f"voice_on_start = {str(voice_on_start).lower()}",
         f"show_state_text = {str(show_state_text).lower()}",
         f"show_transcript = {str(show_transcript).lower()}",
+        f"auto_submit = {str(auto_submit).lower()}",
         "",
         "[keybinds]",
         f"toggle_listen = {json.dumps(keybind_data['name'])}",
