@@ -10,6 +10,25 @@ from vsh.providers import resolve_stt, resolve_thinker, resolve_tts
 
 STATE = {"v": False, "in": None, "out": None, "vad_thr": 1000, "vad_sil": 15, "model": "vosk-model-en-in-0.5"}
 
+# --- SHELL PROXY INTERCEPT ---
+# If vsh is used as $SHELL, programs like nvim and tmux will execute `vsh -c "cmd"`.
+# Typer will crash on -c. We must intercept it at the module level before Typer boots.
+if len(sys.argv) >= 3 and sys.argv[1] == "-c":
+    try:
+        from vsh.core.config import load_config
+
+        cfg = load_config()
+        inner = cfg.shell.inner_shell or os.environ.get("SHELL") or "/bin/bash"
+    except Exception:
+        inner = os.environ.get("SHELL") or "/bin/bash"
+
+    if "vsh" in inner:
+        inner = "/bin/bash"
+
+    # Completely replace current process with the inner shell
+    os.execv(inner, [inner, "-c"] + sys.argv[2:])
+# -----------------------------
+
 
 class NoSuchCommandShowsHelp(typer.core.TyperGroup):
     """Show full help instead of a bare 'No such command' error."""

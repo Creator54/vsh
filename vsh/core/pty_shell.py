@@ -489,7 +489,11 @@ class PtyShell:
             except InterruptedError:
                 continue
 
-            self._render_ui()
+            # Only render UI when terminal is idle (timeout).
+            # This prevents UI ANSI sequences (like save/restore cursor) from interleaving
+            # with active terminal drawings from fzf, nvim, or htop.
+            if not ready_r:
+                self._render_ui()
 
             if self._interrupted:
                 logger.info("Interrupted by signal")
