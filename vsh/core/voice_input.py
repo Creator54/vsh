@@ -107,6 +107,7 @@ class VoiceInputThread(threading.Thread):
                             # Transcribe the accumulated speech
                             text = self.stt_provider.transcribe_stream(iter(audio_chunks))
                             text = text.strip()
+
                             if text:
                                 # We have valid human speech! Lock the mic and show Processing.
                                 if getattr(self, "state_callback", None):

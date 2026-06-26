@@ -48,6 +48,14 @@ class HttpSTTProvider:
             if self.format in ("openai_whisper", "sarvam"):
                 files = {"file": ("audio.wav", wav_data, "audio/wav")}
                 data = {"model": self.model} if self.model else {}
+                if self.format == "openai_whisper":
+                    data.update(
+                        {
+                            "temperature": "0.0",
+                            "prompt": "Terminal voice command.",
+                            "language": "en",
+                        }
+                    )
                 response = requests.post(self.config.endpoint, headers=headers, files=files, data=data)
             else:
                 # Fallback for base64 JSON APIs (e.g. Gemini)
