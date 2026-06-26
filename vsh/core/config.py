@@ -267,6 +267,7 @@ def interactive_setup() -> None:
         message="Speech-to-Text (STT) provider:",
         choices=[
             Choice("vosk", "Vosk (Local, Offline, Fast)"),
+            Choice("gcp", "Google Cloud STT (Cloud, High Accuracy)"),
             Choice("http", "Cloud API (Whisper, Gemini, Sarvam, etc.)"),
         ],
         default="vosk",
@@ -327,6 +328,7 @@ def interactive_setup() -> None:
         message="Text-to-Speech (TTS) provider:",
         choices=[
             Choice("supertonic", "Supertonic (Local, Offline)"),
+            Choice("polly", "AWS Polly (Cloud, Fast)"),
             Choice("http", "Cloud API (OpenAI TTS, ElevenLabs, Sarvam, etc.)"),
             Choice("none", "None (Disable Voice Output)"),
         ],
@@ -349,6 +351,18 @@ def interactive_setup() -> None:
             default="openai_tts",
         ).execute()
         tts_http["model"] = inquirer.text(message="TTS Model name:", default="tts-1").execute()
+    elif tts_provider == "polly":
+        tts_http["model"] = inquirer.select(
+            message="AWS Polly Voice:",
+            choices=[
+                Choice("Matthew", "Matthew (Male, Neural)"),
+                Choice("Joanna", "Joanna (Female, Neural)"),
+                Choice("Stephen", "Stephen (Male, Neural)"),
+                Choice("Ruth", "Ruth (Female, Neural)"),
+                Choice("Kendra", "Kendra (Female, Neural)"),
+            ],
+            default="Matthew",
+        ).execute()
 
     devices = get_audio_devices()
     device_choices = [Choice(None, "Default System Mic")] + [Choice(d[0], f"[{d[0]}] {d[1]}") for d in devices]
@@ -449,6 +463,10 @@ def interactive_setup() -> None:
                 f"model = {json.dumps(tts_http['model'])}",
             ]
         )
+    elif tts_provider == "polly":
+        lines.extend(['provider = "polly"'])
+        if "model" in tts_http:
+            lines.extend([f"model = {json.dumps(tts_http['model'])}"])
     else:
         lines.extend([f'provider = "{tts_provider}"'])
 

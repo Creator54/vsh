@@ -11,6 +11,8 @@ dependencies = [
     "vosk>=0.3.45",
     "loguru>=0.7.2",
     "numpy",
+    "boto3>=1.43.36",
+    "google-cloud-speech>=2.40.0",
     "inquirerpy>=0.3.4",
 ]
 

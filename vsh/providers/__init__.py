@@ -1,30 +1,31 @@
 from vsh.core.config import VshConfig
+from vsh.providers.gcp_stt import GcpSTTProvider
+from vsh.providers.http_audio import HttpSTTProvider, HttpTTSProvider
+from vsh.providers.polly import AwsPollyTTSProvider
+from vsh.providers.supertonic import SupertonicTTSProvider
+from vsh.providers.vosk import VoskSTTProvider
+
+_STT_REGISTRY = {
+    "custom_http": lambda c: HttpSTTProvider(c.stt),
+    "vosk": lambda c: VoskSTTProvider(model_name=c.stt.model, model_url=c.stt.url),
+    "gcp": lambda c: GcpSTTProvider(language_code=getattr(c.stt, "model", "en-US") or "en-US"),
+}
+
+_TTS_REGISTRY = {
+    "custom_http": lambda c: HttpTTSProvider(c.tts),
+    "supertonic": lambda c: SupertonicTTSProvider(),
+    "polly": lambda c: AwsPollyTTSProvider(voice=getattr(c.tts, "model", "Matthew") or "Matthew"),
+}
 
 
 def resolve_stt(config: VshConfig):
-    provider_name = config.stt.provider
-    if provider_name == "custom_http":
-        from vsh.providers.http_audio import HttpSTTProvider
-
-        return HttpSTTProvider(config.stt)
-    elif provider_name == "vosk":
-        from vsh.providers.vosk import VoskSTTProvider
-
-        return VoskSTTProvider(model_name=config.stt.model, model_url=config.stt.url)
-    return None
+    factory = _STT_REGISTRY.get(config.stt.provider)
+    return factory(config) if factory else None
 
 
 def resolve_tts(config: VshConfig):
-    provider_name = config.tts.provider
-    if provider_name == "custom_http":
-        from vsh.providers.http_audio import HttpTTSProvider
-
-        return HttpTTSProvider(config.tts)
-    elif provider_name == "supertonic":
-        from vsh.providers.supertonic import SupertonicTTSProvider
-
-        return SupertonicTTSProvider()
-    return None
+    factory = _TTS_REGISTRY.get(config.tts.provider)
+    return factory(config) if factory else None
 
 
 def resolve_thinker(name: str, config: VshConfig):

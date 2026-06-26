@@ -1,7 +1,4 @@
 import io
-import json
-import urllib.request
-import uuid
 import wave
 from collections.abc import Iterator
 
@@ -41,61 +38,41 @@ class HttpSTTProvider:
 
         logger.debug(f"Sending {len(wav_data)} bytes of WAV audio to {self.config.endpoint} using format {self.format}")
 
+        import requests
+
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        if self.format == "openai_whisper" or self.format == "sarvam":
-            # Multipart form-data
-            boundary = uuid.uuid4().hex
-            headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
-
-            body_parts = []
-            body_parts.append(f"--{boundary}\r\n".encode())
-            body_parts.append(b'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n')
-            body_parts.append(b"Content-Type: audio/wav\r\n\r\n")
-            body_parts.append(wav_data)
-            body_parts.append(b"\r\n")
-
-            if self.model:
-                body_parts.append(f"--{boundary}\r\n".encode())
-                body_parts.append(b'Content-Disposition: form-data; name="model"\r\n\r\n')
-                body_parts.append(self.model.encode("utf-8"))
-                body_parts.append(b"\r\n")
-
-            body_parts.append(f"--{boundary}--\r\n".encode())
-            req_data = b"".join(body_parts)
-        else:
-            # Fallback for base64 JSON APIs (e.g. Gemini)
-            import base64
-
-            headers["Content-Type"] = "application/json"
-            payload = {"audio": base64.b64encode(wav_data).decode("utf-8"), "model": self.model}
-            req_data = json.dumps(payload).encode("utf-8")
-
-        req = urllib.request.Request(self.config.endpoint, data=req_data, headers=headers)
-
         try:
-            with urllib.request.urlopen(req) as response:
-                resp_text = response.read().decode("utf-8")
-                resp_json = json.loads(resp_text)
+            if self.format in ("openai_whisper", "sarvam"):
+                files = {"file": ("audio.wav", wav_data, "audio/wav")}
+                data = {"model": self.model} if self.model else {}
+                response = requests.post(self.config.endpoint, headers=headers, files=files, data=data)
+            else:
+                # Fallback for base64 JSON APIs (e.g. Gemini)
+                import base64
 
-                # Extract text based on standard schema
-                if "text" in resp_json:
-                    res = resp_json["text"]
-                elif "transcript" in resp_json:
-                    res = resp_json["transcript"]
-                else:
-                    logger.warning(f"Unexpected STT response format: {resp_json}")
-                    res = str(resp_json)
+                headers["Content-Type"] = "application/json"
+                payload = {"audio": base64.b64encode(wav_data).decode("utf-8"), "model": self.model}
+                response = requests.post(self.config.endpoint, headers=headers, json=payload)
 
-                if res and on_phrase:
-                    on_phrase(res)
-                return res
-        except Exception as e:
+            response.raise_for_status()
+            resp_json = response.json()
+
+            # Extract text based on standard schema
+            res = resp_json.get("text") or resp_json.get("transcript")
+            if not res:
+                logger.warning(f"Unexpected STT response format: {resp_json}")
+                res = str(resp_json)
+
+            if res and on_phrase:
+                on_phrase(res)
+            return res
+        except requests.exceptions.RequestException as e:
             logger.error(f"HTTP STT request failed: {e}")
-            if hasattr(e, "read"):
-                logger.error(f"Response: {e.read().decode('utf-8')}")
+            if hasattr(e, "response") and e.response is not None:
+                logger.error(f"Response: {e.response.text}")
             return ""
 
 
@@ -132,27 +109,28 @@ class HttpTTSProvider:
             "response_format": "wav",
         }
 
-        req = urllib.request.Request(self.config.endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+        import requests
 
         try:
-            with urllib.request.urlopen(req) as response:
-                audio_bytes = response.read()
+            response = requests.post(self.config.endpoint, headers=headers, json=payload)
+            response.raise_for_status()
+            audio_bytes = response.content
 
-                # Parse the WAV header to extract PCM data
-                with io.BytesIO(audio_bytes) as wav_io:
-                    try:
-                        with wave.open(wav_io, "rb") as wf:
-                            frames = wf.readframes(wf.getnframes())
-                            # Convert to float32 numpy array normalized to [-1.0, 1.0]
-                            audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-                            return audio_data
-                    except wave.Error:
-                        # Fallback if raw PCM is returned instead of WAV
-                        logger.warning("Failed to parse WAV header, assuming raw 16-bit PCM")
-                        return np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        except Exception as e:
+            # Parse the WAV header to extract PCM data
+            with io.BytesIO(audio_bytes) as wav_io:
+                try:
+                    with wave.open(wav_io, "rb") as wf:
+                        frames = wf.readframes(wf.getnframes())
+                        # Convert to float32 numpy array normalized to [-1.0, 1.0]
+                        audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+                        return audio_data
+                except wave.Error:
+                    # Fallback if raw PCM is returned instead of WAV
+                    logger.warning("Failed to parse WAV header, assuming raw 16-bit PCM")
+                    return np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        except requests.exceptions.RequestException as e:
             logger.error(f"HTTP TTS request failed: {e}")
-            if hasattr(e, "read"):
-                logger.error(f"Response: {e.read().decode('utf-8')}")
+            if hasattr(e, "response") and e.response is not None:
+                logger.error(f"Response: {e.response.text}")
             # Return empty array on failure
             return np.zeros(1, dtype=np.float32)
