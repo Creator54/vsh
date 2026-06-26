@@ -91,7 +91,18 @@ class SarvamTTSProvider:
                 with wave.open(wav_io, "rb") as wf:
                     frames = wf.readframes(wf.getnframes())
                     audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-                    return audio_data
+
+                    # Upsample 16000Hz to 44100Hz for vsh playback
+                    original_rate = 16000
+                    target_rate = 44100
+                    duration = len(audio_data) / original_rate
+                    target_length = int(duration * target_rate)
+
+                    x_old = np.linspace(0, duration, len(audio_data))
+                    x_new = np.linspace(0, duration, target_length)
+                    resampled_audio = np.interp(x_new, x_old, audio_data).astype(np.float32)
+
+                    return resampled_audio
 
         except Exception as e:
             logger.error(f"Sarvam TTS failed: {e}")
