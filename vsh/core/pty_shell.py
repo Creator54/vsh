@@ -248,7 +248,9 @@ class PtyShell:
             self._set_cursor_state(state)
 
     def _set_cursor_state(self, state: str, text: str = None):
-        """Update terminal cursor color based on processing state to avoid terminal text pollution."""
+        """Update internal state + overlay. Only the legacy "cursor" mode recolors the
+        terminal cursor; in "statusline"/"none" modes the overlay must stay transparent
+        and must NOT touch the user's cursor (that was the whole point)."""
         if text is not None:
             self._current_transcript = text
             self._transcript_time = time.time()
@@ -263,18 +265,21 @@ class PtyShell:
                 self.voice_thread.is_processing = False
 
         self._current_cursor_state = state
-        if state == "listening_active":
-            sys.stdout.buffer.write(b"\033]12;#ff00ff\a\033[1 q")  # Bright Pink blink
-        elif state == "listening_idle":
-            sys.stdout.buffer.write(b"\033]12;#880000\a\033[1 q")  # Dark Red blink
-        elif state == "transcribing":
-            sys.stdout.buffer.write(b"\033]12;#00ffff\a\033[1 q")  # Cyan
-        elif state == "thinking":
-            sys.stdout.buffer.write(b"\033]12;#ffa500\a\033[3 q")  # Orange underline
-        elif state in ("typing", "speaking"):
-            sys.stdout.buffer.write(b"\033]12;#00ff00\a\033[4 q")  # Green underline
-        else:
-            sys.stdout.buffer.write(CURSOR_DEFAULT)
+
+        # Only pollute the cursor in legacy "cursor" mode. Transparent modes skip this.
+        if getattr(self.config.shell, "overlay_mode", "cursor") == "cursor":
+            if state == "listening_active":
+                sys.stdout.buffer.write(b"\033]12;#ff00ff\a\033[1 q")  # Bright Pink blink
+            elif state == "listening_idle":
+                sys.stdout.buffer.write(b"\033]12;#880000\a\033[1 q")  # Dark Red blink
+            elif state == "transcribing":
+                sys.stdout.buffer.write(b"\033]12;#00ffff\a\033[1 q")  # Cyan
+            elif state == "thinking":
+                sys.stdout.buffer.write(b"\033]12;#ffa500\a\033[3 q")  # Orange underline
+            elif state in ("typing", "speaking"):
+                sys.stdout.buffer.write(b"\033]12;#00ff00\a\033[4 q")  # Green underline
+            else:
+                sys.stdout.buffer.write(CURSOR_DEFAULT)
 
         sys.stdout.buffer.flush()
         self._render_ui()

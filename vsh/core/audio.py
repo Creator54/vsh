@@ -1,6 +1,5 @@
 import warnings
 
-# ponytail: silence deprecation noise at source
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 import contextlib  # noqa: E402
 import os  # noqa: E402
@@ -31,11 +30,15 @@ def no_stderr():
 def play_audio(data: bytes, rate: int, width: int = 2, device_index=None):
     with no_stderr():
         pa = pyaudio.PyAudio()
-        s = pa.open(format=pyaudio.paInt16, channels=1, rate=rate, output=True, output_device_index=device_index)
-        s.write(data)
-        s.stop_stream()
-        s.close()
-        pa.terminate()
+        try:
+            s = pa.open(format=pyaudio.paInt16, channels=1, rate=rate, output=True, output_device_index=device_index)
+            try:
+                s.write(data)
+            finally:
+                s.stop_stream()
+                s.close()
+        finally:
+            pa.terminate()
 
 
 def save_audio(p: str, data: bytes, rate: int, width: int = 2):
@@ -181,7 +184,7 @@ class MicStream:
 
 
 if __name__ == "__main__":
-    # ponytail: quick check if audio device is accessible
+    # quick check if audio device is accessible
     try:
         with MicStream() as stream:
             logger.info("Recording for 1 second...")

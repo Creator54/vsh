@@ -80,5 +80,47 @@ class TestHeadlessImport(unittest.TestCase):
         self.assertTrue(hasattr(cfg_mod, "VshConfig"))
 
 
+class TestCursorPollution(unittest.TestCase):
+    """Transparent overlay modes must NOT recolor the user's terminal cursor."""
+
+    def _make_shell(self, overlay_mode):
+        cfg = VshConfig()
+        cfg.shell.overlay_mode = overlay_mode
+        with patch("vsh.core.pty_shell.VoiceInputThread", return_value=_FakeVoiceThread()):
+            shell = PtyShell(cfg, thinker=None, verbose=False, tts_provider=None)
+        shell.master_fd = 7
+        shell.rows, shell.cols = 24, 80
+        return shell
+
+    def test_statusline_does_not_recolor_cursor(self):
+        shell = self._make_shell("statusline")
+        buf = MagicMock()
+        with patch("sys.stdout") as mock_stdout:
+            mock_stdout.buffer = buf
+            # Every state transition should leave the cursor untouched in transparent mode
+            for state in ("listening_active", "transcribing", "thinking", "speaking", "idle"):
+                shell._set_cursor_state(state)
+        # OSC 12 (cursor color) sequence must never be emitted
+        for call in buf.write.call_args_list:
+            self.assertNotIn(b"\x1b]12;", call[0][0])
+
+    def test_none_mode_does_not_recolor_cursor(self):
+        shell = self._make_shell("none")
+        buf = MagicMock()
+        with patch("sys.stdout") as mock_stdout:
+            mock_stdout.buffer = buf
+            shell._set_cursor_state("listening_active")
+        for call in buf.write.call_args_list:
+            self.assertNotIn(b"\x1b]12;", call[0][0])
+
+    def test_cursor_mode_still_recolors(self):
+        shell = self._make_shell("cursor")
+        buf = MagicMock()
+        with patch("sys.stdout") as mock_stdout:
+            mock_stdout.buffer = buf
+            shell._set_cursor_state("listening_active")
+        self.assertTrue(any(b"\x1b]12;" in call[0][0] for call in buf.write.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()
