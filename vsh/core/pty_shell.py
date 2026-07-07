@@ -196,7 +196,7 @@ class PtyShell:
             if getattr(self.config.shell, "overlay_mode", "cursor") == "statusline":
                 try:
                     rows = self.rows
-                    line = rows if getattr(self.config.shell, "overlay_line", "bottom") == "bottom" else 1
+                    line = rows  # statusline HUD is always the bottom row (PTY is shrunk by 1)
                     sys.stdout.buffer.write(f"\033[{line};1H\033[K".encode())
                 except Exception:
                     pass
@@ -410,7 +410,7 @@ class PtyShell:
             return
 
         rows, cols = self.rows, self.cols
-        line = rows if getattr(self.config.shell, "overlay_line", "bottom") == "bottom" else 1
+        line = rows  # statusline HUD is always the bottom row (PTY is shrunk by 1)
 
         # Determine label text (no braille indicators in the reserved row; use plain text)
         labels = {

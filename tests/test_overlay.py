@@ -19,7 +19,6 @@ class TestOverlayConfig(unittest.TestCase):
     def test_default_overlay_mode_is_cursor(self):
         cfg = VshConfig()
         self.assertEqual(cfg.shell.overlay_mode, "cursor")
-        self.assertEqual(cfg.shell.overlay_line, "bottom")
         self.assertEqual(cfg.shell.overlay_color, "36")
 
 
@@ -27,7 +26,6 @@ class TestStatuslineRender(unittest.TestCase):
     def _make_shell(self, overlay_mode="statusline"):
         cfg = VshConfig()
         cfg.shell.overlay_mode = overlay_mode
-        cfg.shell.overlay_line = "bottom"
         with patch("vsh.core.pty_shell.VoiceInputThread", return_value=_FakeVoiceThread()):
             shell = PtyShell(cfg, thinker=None, verbose=False, tts_provider=None)
         shell.master_fd = 7  # dummy fd; not used by render

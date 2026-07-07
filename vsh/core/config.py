@@ -16,7 +16,6 @@ class ShellConfig:
     show_transcript: bool = True
     auto_submit: bool = False
     overlay_mode: str = "cursor"  # "cursor" (legacy corner HUD), "statusline" (reserved transparent line), "none"
-    overlay_line: str = "bottom"  # "bottom" or "top" (statusline mode only)
     overlay_color: str = "36"  # ANSI color code for the statusline text
 
 
