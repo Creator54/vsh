@@ -1,3 +1,5 @@
+import struct
+import termios
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -118,6 +120,64 @@ class TestCursorPollution(unittest.TestCase):
             mock_stdout.buffer = buf
             shell._set_cursor_state("listening_active")
         self.assertTrue(any(b"\x1b]12;" in call[0][0] for call in buf.write.call_args_list))
+
+
+class TestCursorTypingCollision(unittest.TestCase):
+    """The legacy 'cursor' overlay must NOT paint its HUD on the user's typing row.
+
+    Regression guard for: HUD overlapping typed input until the next line wraps.
+    Fixed by reserving a bottom row (PTY shrunk by 1) and drawing on it absolutely.
+    """
+
+    def _make_shell(self):
+        cfg = VshConfig()
+        cfg.shell.overlay_mode = "cursor"
+        with patch("vsh.core.pty_shell.VoiceInputThread", return_value=_FakeVoiceThread()):
+            shell = PtyShell(cfg, thinker=None, verbose=False, tts_provider=None)
+        shell.master_fd = 7
+        shell.rows, shell.cols = 24, 80
+        shell._current_cursor_state = "listening_idle"
+        shell.is_listening = True
+        return shell
+
+    def test_sigwinch_shrinks_pty_by_one_row(self):
+        # Patch ioctl to capture the size handed to the PTY
+        captured = {}
+
+        def fake_ioctl(fd, request, arg):
+            if request == termios.TIOCSWINSZ:
+                r, c, *_ = struct.unpack("HHHH", arg)
+                captured["rows"] = r
+                captured["cols"] = c
+            return b""
+
+        shell = self._make_shell()
+        with patch("fcntl.ioctl", side_effect=fake_ioctl), patch("termios.TIOCGWINSZ", termios.TIOCGWINSZ, create=True):
+            # _handle_sigwinch reads size from stdout; give it a fake size
+            with patch(
+                "fcntl.ioctl",
+                side_effect=lambda fd, req, arg: (
+                    struct.pack("hh", 24, 80) if req == termios.TIOCGWINSZ else fake_ioctl(fd, req, arg)
+                ),
+            ):
+                shell._handle_sigwinch(None, None)
+        self.assertEqual(captured["rows"], 23)  # 24 - 1 reserved
+        self.assertEqual(captured["cols"], 80)
+
+    def test_hud_renders_on_reserved_bottom_row_not_typing_row(self):
+        shell = self._make_shell()
+        buf = MagicMock()
+        with patch("sys.stdout") as mock_stdout:
+            mock_stdout.buffer = buf
+            shell._render_ui()
+        written = buf.write.call_args[0][0].decode()
+        # HUD must target the bottom row (24) absolutely...
+        self.assertIn("[24;", written)
+        # ...and must never jump to a column on the current (unspecified) row via
+        # bare "\033[<col>G" (that's what caused the typing collision).
+        self.assertNotIn("G\033[K", written)
+        # HUD label is present on its own reserved row (idle w/ zero energy -> "Mute")
+        self.assertIn("Mute", written)
 
 
 if __name__ == "__main__":

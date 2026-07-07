@@ -192,8 +192,8 @@ class PtyShell:
         """Restore original terminal state and cursor."""
         if self.old_tty_attrs:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, self.old_tty_attrs)
-            # Clear any reserved statusline row so it doesn't linger in the scrollback
-            if getattr(self.config.shell, "overlay_mode", "cursor") == "statusline":
+            # Clear any reserved HUD row so it doesn't linger in the scrollback
+            if getattr(self.config.shell, "overlay_mode", "cursor") in ("statusline", "cursor"):
                 try:
                     rows = self.rows
                     line = rows  # statusline HUD is always the bottom row (PTY is shrunk by 1)
@@ -218,10 +218,10 @@ class PtyShell:
             rows, cols = struct.unpack("hh", buf)
             self.rows, self.cols = rows, cols
 
-            # In "statusline" overlay mode, reserve one row for the HUD so the inner
-            # shell never paints over it (fully transparent, no tearing).
+            # In "statusline" and "cursor" overlay modes, reserve one row for the HUD so
+            # the inner shell never paints over it (fully transparent, no typing collision).
             mode = getattr(self.config.shell, "overlay_mode", "cursor")
-            pty_rows = (rows - 1) if mode == "statusline" else rows
+            pty_rows = (rows - 1) if mode in ("statusline", "cursor") else rows
 
             # Set it on the PTY
             fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", max(1, pty_rows), cols, 0, 0))
@@ -468,8 +468,9 @@ class PtyShell:
         # Hide the UI completely so it behaves exactly like a normal shell.
         if not getattr(self, "is_listening", False):
             if self.cols > 16:
-                last_pos = getattr(self, "_last_ui_pos", self.cols - 15)
-                sys.stdout.buffer.write(f"\033[s\033[{last_pos}G\033[K\033[u".encode())
+                rows = self.rows
+                # Clear the reserved HUD row (save/restore so the shell cursor is untouched)
+                sys.stdout.buffer.write(f"\033[s\033[{rows};1H\033[K\033[u".encode())
                 sys.stdout.buffer.flush()
             return
 
@@ -543,20 +544,30 @@ class PtyShell:
                     t = t[: max_len - 3] + "..."
                 transcript_display = f"\033[90m{t}\033[0m "
 
-            # \033[s saves cursor. \033[{col}G moves cursor to far right of current row. \033[K clears to end of line. \033[u restores cursor.
+            # Draw the animated corner widget on the RESERVED bottom row (absolute
+            # position). Because the PTY is shrunk by one row (see _handle_sigwinch),
+            # this line is never the user's typing line — so it can't obscure input.
+            # We move to (rows, pos), paint, and move back to the reserved row start;
+            # no save/restore-cursor into the shell's scrollback, no \033[K clear-to-EOL.
             color = "\033[36m" if state == "idle" else "\033[1;35m"  # Cyan for idle, Magenta for active
 
-            # Position = cols - length of display_text - length of the raw transcript text (no ansi codes)
+            # Anchor the widget at the right edge of the reserved row
             pos = max(1, self.cols - len(display_text) - 1 - (len(t) + 1 if transcript_display else 0))
 
             last_pos = getattr(self, "_last_ui_pos", pos)
             clear_str = ""
             if pos > last_pos:
-                # The widget shrank (e.g. transcript disappeared). Clear the leftover text from its previous far-left position.
+                # The widget shrank (e.g. transcript disappeared). Clear the leftover
+                # text on the reserved row at its previous far-left position.
                 clear_str = f"\033[{last_pos}G\033[K"
             self._last_ui_pos = pos
 
-            ui_str = f"\033[s{clear_str}\033[{pos}G{transcript_display}{color}{display_text}\033[0m\033[K\033[u"
+            # Save the shell cursor, jump to the reserved bottom row, paint (clearing
+            # trailing chars on that row), then restore the shell cursor. Exactly like
+            # _render_statusline — no drawing happens on the user's typing line.
+            ui_str = (
+                f"\033[s\033[{self.rows};{pos}H{clear_str}{transcript_display}{color}{display_text}\033[0m\033[K\033[u"
+            )
             sys.stdout.buffer.write(ui_str.encode())
             sys.stdout.buffer.flush()
 
