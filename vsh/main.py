@@ -71,6 +71,9 @@ def main(
     voice: bool = typer.Option(False, "--voice", help="Start shell with microphone hot."),
     v: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logs."),
     echo: bool = typer.Option(False, "--echo", help="Run in diagnostic echo mode without LLMs."),
+    no_overlay: bool = typer.Option(
+        False, "--no-overlay", help="Disable the voice HUD overlay entirely (pure passthrough)."
+    ),
 ):
     """Voice Shell — Default action is to start the interactive terminal wrapper."""
     setup_logger(v)
@@ -84,6 +87,9 @@ def main(
 
     if voice:
         config.shell.voice_on_start = True
+
+    if no_overlay:
+        config.shell.overlay_mode = "none"
 
     if echo:
         config.llm.provider = "echo"
@@ -249,33 +255,69 @@ def bind():
         return
 
     try:
-        # We can't just dump TOML easily in python 3.11 without a 3rd party lib if we want to preserve comments
-        # But config.toml is usually clean, we'll try to update it safely by string replacement
-        content = config_path.read_text()
+        # Round-trip through tomllib so the edit is robust against different spacing,
+        # comments, and table ordering. We only regenerate the [keybinds] table; the
+        # rest of the file is preserved verbatim.
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
 
-        # update toggle_listen
-        import re
+        with open(config_path, "rb") as f:
+            data = tomllib.load(f)
 
-        content = re.sub(r'toggle_listen\s*=\s*".*?"', f"toggle_listen = {json.dumps(keybind_data['name'])}", content)
+        kb = dict(data.get("keybinds", {}))
+        kb["toggle_listen"] = keybind_data["name"]
+        kb["toggle_listen_triggers"] = keybind_data["triggers"]
+        data["keybinds"] = kb
 
-        # update toggle_listen_triggers or add it if missing
-        if "toggle_listen_triggers" in content:
-            content = re.sub(
-                r"toggle_listen_triggers\s*=\s*\[.*?\]",
-                f"toggle_listen_triggers = {json.dumps(keybind_data['triggers'])}",
-                content,
-                flags=re.DOTALL,
-            )
-        else:
-            # append it under [keybinds]
-            content = re.sub(
-                r"(\[keybinds\].*?\n)",
-                f"\\1toggle_listen_triggers = {json.dumps(keybind_data['triggers'])}\n",
-                content,
-                flags=re.DOTALL,
-            )
+        def _dump_value(v):
+            if isinstance(v, bool):
+                return "true" if v else "false"
+            if isinstance(v, list | tuple):
+                return "[" + ", ".join(_dump_value(x) for x in v) + "]"
+            return json.dumps(v)
 
-        config_path.write_text(content)
+        lines = config_path.read_text().splitlines()
+        out = []
+        i = 0
+        n = len(lines)
+        in_keybinds = False
+        kb_replaced = False
+        while i < n:
+            line = lines[i]
+            stripped = line.strip()
+            if stripped == "[keybinds]":
+                # Emit the regenerated keybinds table and skip until the next section
+                out.append("[keybinds]")
+                for k, v in kb.items():
+                    out.append(f"{k} = {_dump_value(v)}")
+                kb_replaced = True
+                in_keybinds = True
+                i += 1
+                continue
+            if in_keybinds:
+                # Stop skipping once we hit the next table header
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    in_keybinds = False
+                    out.append(line)
+                    i += 1
+                    continue
+                else:
+                    i += 1
+                    continue
+            out.append(line)
+            i += 1
+
+        # If no [keybinds] section existed, append one
+        if not kb_replaced:
+            if out and out[-1].strip():
+                out.append("")
+            out.append("[keybinds]")
+            for k, v in kb.items():
+                out.append(f"{k} = {_dump_value(v)}")
+
+        config_path.write_text("\n".join(out) + "\n")
         sys.stdout.write("Updated config.toml with new keybind.\n")
 
     except Exception as e:

@@ -5,8 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pyaudio
-from InquirerPy import inquirer
-from InquirerPy.base.control import Choice
 from loguru import logger
 
 
@@ -17,6 +15,9 @@ class ShellConfig:
     show_state_text: bool = True
     show_transcript: bool = True
     auto_submit: bool = False
+    overlay_mode: str = "cursor"  # "cursor" (legacy corner HUD), "statusline" (reserved transparent line), "none"
+    overlay_line: str = "bottom"  # "bottom" or "top" (statusline mode only)
+    overlay_color: str = "36"  # ANSI color code for the statusline text
 
 
 @dataclass
@@ -209,6 +210,11 @@ def interactive_setup(section: str = None) -> None:
     import os
     import shutil
     import sys
+
+    # Lazy import: InquirerPy is only needed for the interactive wizard, not for
+    # headless commands (stt/tts/wrap) or importing vsh modules in tests.
+    from InquirerPy import inquirer
+    from InquirerPy.base.control import Choice
 
     try:
         import tomllib
@@ -661,6 +667,13 @@ def load_config() -> VshConfig:
 
     if "VSH_LLM_KEY" in os.environ:
         cfg.llm.api_key = os.environ["VSH_LLM_KEY"]
+
+    if "VSH_OVERLAY" in os.environ:
+        val = os.environ["VSH_OVERLAY"].lower()
+        if val in ("none", "cursor", "statusline"):
+            cfg.shell.overlay_mode = val
+        elif val in ("0", "off", "false"):
+            cfg.shell.overlay_mode = "none"
 
     config_path = _get_config_path()
     if not config_path.exists():

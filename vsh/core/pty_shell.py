@@ -192,6 +192,14 @@ class PtyShell:
         """Restore original terminal state and cursor."""
         if self.old_tty_attrs:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, self.old_tty_attrs)
+            # Clear any reserved statusline row so it doesn't linger in the scrollback
+            if getattr(self.config.shell, "overlay_mode", "cursor") == "statusline":
+                try:
+                    rows = self.rows
+                    line = rows if getattr(self.config.shell, "overlay_line", "bottom") == "bottom" else 1
+                    sys.stdout.buffer.write(f"\033[{line};1H\033[K".encode())
+                except Exception:
+                    pass
             sys.stdout.buffer.write(CURSOR_DEFAULT)
             sys.stdout.buffer.flush()
 
@@ -209,8 +217,14 @@ class PtyShell:
             buf = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"0000")
             rows, cols = struct.unpack("hh", buf)
             self.rows, self.cols = rows, cols
+
+            # In "statusline" overlay mode, reserve one row for the HUD so the inner
+            # shell never paints over it (fully transparent, no tearing).
+            mode = getattr(self.config.shell, "overlay_mode", "cursor")
+            pty_rows = (rows - 1) if mode == "statusline" else rows
+
             # Set it on the PTY
-            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", max(1, pty_rows), cols, 0, 0))
         except Exception:
             pass
 
@@ -344,8 +358,9 @@ class PtyShell:
                 if self.verbose:
                     self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} or Ctrl+G to toggle.")
                 if self.config.shell.voice_on_start:
-                    # We inject a simulated toggle keypress into our own loop so it runs safely
-                    os.write(self.master_fd, b"\x00")  # A dummy byte to wake up select
+                    # _toggle_listening() renders the new state immediately; the io_loop's
+                    # 0.1s select() already wakes on its own, so we must NOT inject a byte
+                    # into the inner shell (it would arrive as Ctrl+Space/Null input).
                     self._toggle_listening()
 
             threading.Thread(target=show_startup_ui, daemon=True).start()
@@ -377,8 +392,70 @@ class PtyShell:
                     except ProcessLookupError:
                         pass
 
+    def _render_statusline(self):
+        """Transparent overlay: draw the HUD on a dedicated reserved row.
+
+        The PTY is shrunk by one row (see _handle_sigwinch), so this line never
+        overlaps the inner shell's content. No save/restore-cursor into the user's
+        own scrollback, no tearing under fzf/nvim/htop.
+        """
+        state = getattr(self, "_current_cursor_state", "idle")
+        mode = getattr(self.config.shell, "overlay_mode", "cursor")
+        if mode != "statusline":
+            return
+
+        rows, cols = self.rows, self.cols
+        line = rows if getattr(self.config.shell, "overlay_line", "bottom") == "bottom" else 1
+
+        # Determine label text (no braille indicators in the reserved row; use plain text)
+        labels = {
+            "idle": "Idle",
+            "listening_idle": "Listening…",
+            "listening_active": "Listening ●",
+            "transcribing": "Transcribing…",
+            "thinking": "Thinking…",
+            "typing": "Typing…",
+            "speaking": "Speaking…",
+        }
+        label = labels.get(state, "Idle")
+
+        show_text = getattr(self.config.shell, "show_state_text", True)
+        show_transcript = getattr(self.config.shell, "show_transcript", True)
+
+        left = f"vsh: {label}" if show_text else "vsh"
+
+        # Optional transcript on the same line (clipped to remaining width)
+        right = ""
+        if show_transcript and state in ("transcribing", "thinking") and getattr(self, "_current_transcript", ""):
+            t = self._current_transcript.replace("\n", " ").replace("\r", "")
+            max_len = max(0, cols - len(left) - 3)
+            if len(t) > max_len:
+                t = t[: max_len - 1] + "…"
+            right = t
+
+        color = getattr(self.config.shell, "overlay_color", "36")
+        gap = "  " if right else ""
+        content = f"\033[{color}m{left}\033[0m{gap}{right}"
+
+        # Pad to full width and clear the whole line so nothing lingers
+        padded = content.ljust(cols)[:cols]
+        # Move to the reserved row, col 1; clear line; write; restore cursor.
+        seq = f"\033[s\033[{line};1H\033[K{padded}\033[u"
+        sys.stdout.buffer.write(seq.encode())
+        sys.stdout.buffer.flush()
+
     def _render_ui(self):
-        """Render the 3-character state indicator and text in the top-right corner."""
+        """Render the 3-character state indicator and text in the top-right corner.
+
+        Legacy "cursor" overlay mode. New transparent "statusline" mode is handled
+        separately in _render_statusline().
+        """
+        mode = getattr(self.config.shell, "overlay_mode", "cursor")
+        if mode == "statusline":
+            self._render_statusline()
+            return
+        if mode == "none":
+            return
 
         state = getattr(self, "_current_cursor_state", "idle")
 
@@ -515,9 +592,6 @@ class PtyShell:
                     os.write(self.master_fd, b"\x04")
                     break
 
-                with open("/tmp/vsh_keys.log", "a") as f:
-                    f.write(repr(data) + "\n")
-
                 if any(t in data for t in self.triggers):
                     for t in self.triggers:
                         data = data.replace(t, b"")
@@ -538,8 +612,4 @@ class PtyShell:
                     break
 
                 sys.stdout.buffer.write(data)
-                # ponytail: force cursor state after PTY redraws (e.g. prompt resets)
-                state = getattr(self, "_current_cursor_state", "idle")
-                if state != "idle":
-                    self._set_cursor_state(state)
                 sys.stdout.buffer.flush()

@@ -32,10 +32,10 @@ def play_audio(data: bytes, rate: int, width: int = 2, device_index=None):
     with no_stderr():
         pa = pyaudio.PyAudio()
         s = pa.open(format=pyaudio.paInt16, channels=1, rate=rate, output=True, output_device_index=device_index)
-    s.write(data)
-    s.stop_stream()
-    s.close()
-    pa.terminate()
+        s.write(data)
+        s.stop_stream()
+        s.close()
+        pa.terminate()
 
 
 def save_audio(p: str, data: bytes, rate: int, width: int = 2):
