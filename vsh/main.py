@@ -74,6 +74,8 @@ def main(
     no_overlay: bool = typer.Option(
         False, "--no-overlay", help="Disable the voice HUD overlay entirely (pure passthrough)."
     ),
+    serve: bool = typer.Option(False, "--serve", help="Expose this live shell to kai over HTTP."),
+    port: int = typer.Option(8770, "--port", help="Port for --serve (default 8770)."),
 ):
     """Voice Shell — Default action is to start the interactive terminal wrapper."""
     setup_logger(v)
@@ -102,11 +104,22 @@ def main(
             sys.stderr.write(f"[vsh] Failed to load thinker '{config.llm.provider}': {e}\n")
             logger.error(f"Failed to load thinker '{config.llm.provider}': {e}")
 
-    tts_provider = resolve_tts(config)
+    tts_provider = None
+    try:
+        tts_provider = resolve_tts(config)
+    except Exception as e:
+        sys.stderr.write(f"[vsh] Failed to load TTS '{config.tts.provider}': {e}\n")
+        logger.error(f"Failed to load TTS '{config.tts.provider}': {e}")
+
     if config.tts.provider and not tts_provider:
-        logger.warning(f"Unknown TTS provider: {config.tts.provider}")
+        logger.warning(f"Unknown or failed TTS provider: {config.tts.provider}")
 
     pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
+
+    if serve:
+        from vsh.core.server import serve as serve_http
+
+        serve_http(pty_shell, port=port)
 
     try:
         pty_shell.run()
@@ -123,7 +136,6 @@ def stt(
     STATE["in"] = config.stt.device_index
     STATE["vad_thr"] = config.stt.vad_threshold
 
-    sys.stderr.write("[vsh] VSH STT active\n")
     stt_provider = resolve_stt(config)
     if not stt_provider:
         from vsh.providers.vosk import VoskSTTProvider

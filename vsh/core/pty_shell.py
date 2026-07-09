@@ -1,7 +1,9 @@
+import collections
 import fcntl
 import os
 import pty
 import queue
+import re
 import select
 import signal
 import struct
@@ -18,6 +20,22 @@ from vsh.core.voice_input import VoiceInputThread
 
 # ANSI escape sequences for cursor control and terminal title
 CURSOR_DEFAULT = b"\033]112\a\033[0 q\033]0;vsh\a"
+
+# Strip ANSI/OSC (incl. trailing partial OSC) from captured command output.
+_ANSI = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-_][0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(b: bytes) -> bytes:
+    return _ANSI.sub(b"", b)
+
+
+def _strip_unicode(text: str) -> str:
+    """Generic unicode cleanup for UI characters (Box drawing, Symbols, Nerd Fonts, Emojis)."""
+    return re.sub(
+        r'[\u2300-\u25ff\u2700-\u27bf\ue000-\uf8ff]|[\ud800-\udbff][\udc00-\udfff]', 
+        '', 
+        text
+    )
 
 
 class PtyShell:
@@ -88,6 +106,18 @@ class PtyShell:
         self.rows = 24
         self._last_energy = 0
         self._anim_frame = 0
+
+        # Shell identity + live exec state (exposed over HTTP for kai/remote).
+        self.shell_name = os.path.basename(self.inner_shell)
+        self.shell_pid = None
+        self.shell_state = "starting"  # starting|idle|busy
+        self._exec_lock = threading.Lock()   # one kai command at a time
+        self._cap_buf = None                  # bytes buffer while capturing
+        self._cap_done = threading.Event()
+        self._cap_exit = None
+
+        self.input_history = collections.deque(maxlen=2000)
+        self.output_history = collections.deque(maxlen=2000)
 
     def _pipeline_worker(self):
         """Background worker to handle thinking and coordination without blocking the shell."""
@@ -184,7 +214,10 @@ class PtyShell:
                 self.tts_queue.task_done()
 
     def _setup_terminal(self):
-        """Save terminal state and enter raw mode."""
+        """Save terminal state and enter raw mode (skip if no TTY, e.g. --serve)."""
+        if not os.isatty(sys.stdin.fileno()):
+            self.old_tty_attrs = None
+            return
         self.old_tty_attrs = termios.tcgetattr(sys.stdin.fileno())
         tty.setraw(sys.stdin.fileno())
 
@@ -337,6 +370,7 @@ class PtyShell:
                 os._exit(1)
         else:
             # Parent process: act as proxy
+            self.shell_pid = pid
 
             # Setup signal handlers
             signal.signal(signal.SIGINT, self._handle_sigint)
@@ -360,6 +394,7 @@ class PtyShell:
             # Defer UI updates slightly so the inner shell doesn't overwrite them
             def show_startup_ui():
                 time.sleep(0.5)
+                self.shell_state = "idle"
                 if self.verbose:
                     self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} or Ctrl+G to toggle.")
                 if self.config.shell.voice_on_start:
@@ -571,6 +606,63 @@ class PtyShell:
             sys.stdout.buffer.write(ui_str.encode())
             sys.stdout.buffer.flush()
 
+    def exec_command(self, command: str, timeout: float = 120.0):
+        """Inject a command into the live shell, capture its output + exit code.
+
+        Returns (output_str, exit_code). Raises RuntimeError if the shell is
+        busy (user or another exec mid-command).
+        """
+        if not self._exec_lock.acquire(blocking=False):
+            raise RuntimeError("shell busy")
+        try:
+            self.shell_state = "busy"
+            self._cap_buf = bytearray()
+            
+            # Snapshot the baseline prompt (last non-empty line of current terminal state)
+            baseline_tail = ""
+            if self.output_history:
+                # deque does not support slicing, convert to list first
+                recent_history = list(self.output_history)[-50:]
+                raw_hist = b"".join(recent_history)
+                clean_hist = _strip_unicode(_strip_ansi(raw_hist).decode("utf-8", "replace"))
+                hist_lines = [line for line in clean_hist.split("\n") if line.strip()]
+                if hist_lines:
+                    baseline_tail = hist_lines[-1].strip()
+                    
+            os.write(self.master_fd, command.encode() + b"\n")
+            
+            # Wait for silence to assume command completion
+            start = time.time()
+            last_len = 0
+            silence_start = time.time()
+            while time.time() - start < timeout:
+                time.sleep(0.1)
+                curr_len = len(self._cap_buf)
+                if curr_len != last_len:
+                    silence_start = time.time()
+                    last_len = curr_len
+                elif time.time() - silence_start > 0.5:
+                    break
+            
+            raw = bytes(self._cap_buf)
+            nl = raw.find(b"\n")
+            body = raw[nl + 1:] if nl != -1 else raw
+            self.shell_state = "idle"
+            clean_out = _strip_unicode(_strip_ansi(body).decode("utf-8", "replace"))
+            
+            lines = clean_out.split('\n')
+            while lines and not lines[-1].strip():
+                lines.pop()
+                
+            # Dynamic Cleanup: If the bottom line of output exactly matches the baseline prompt tail, drop it!
+            if lines and baseline_tail and lines[-1].strip() == baseline_tail:
+                lines.pop()
+            
+            return "\n".join(lines).strip(), 0
+        finally:
+            self._cap_buf = None
+            self._exec_lock.release()
+
     def _io_loop(self):
         """The main select() loop that multiplexes stdin and PTY. Non-blocking."""
         while True:
@@ -615,6 +707,7 @@ class PtyShell:
 
                 # Forward everything else to PTY
                 if data:
+                    self.input_history.append(data)
                     os.write(self.master_fd, data)
 
             # 2. Process PTY output
@@ -627,5 +720,8 @@ class PtyShell:
                 if not data:
                     break
 
+                self.output_history.append(data)
+                if self._cap_buf is not None:
+                    self._cap_buf.extend(data)
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()
