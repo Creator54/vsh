@@ -31,7 +31,7 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "N", "UP", "B", "C4"]
-ignore = ["E501"]
+ignore = ["E501", "N802"]  # N802: stdlib BaseHTTPRequestHandler mandates do_GET/do_POST casing
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

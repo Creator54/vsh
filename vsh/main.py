@@ -135,6 +135,7 @@ def stt(
     config = load_config()
     STATE["in"] = config.stt.device_index
     STATE["vad_thr"] = config.stt.vad_threshold
+    STATE["vad_sil"] = config.stt.vad_silence_limit
 
     stt_provider = resolve_stt(config)
     if not stt_provider:
@@ -172,6 +173,7 @@ def tts(
 ):
     """Text-to-Speech: Read text aloud."""
     config = load_config()
+    STATE["out"] = config.tts.device_index
     text = text or (not sys.stdin.isatty() and sys.stdin.read().strip())
     if not text:
         logger.error("No input")

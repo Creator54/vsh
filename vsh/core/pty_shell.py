@@ -31,11 +31,7 @@ def _strip_ansi(b: bytes) -> bytes:
 
 def _strip_unicode(text: str) -> str:
     """Generic unicode cleanup for UI characters (Box drawing, Symbols, Nerd Fonts, Emojis)."""
-    return re.sub(
-        r'[\u2300-\u25ff\u2700-\u27bf\ue000-\uf8ff]|[\ud800-\udbff][\udc00-\udfff]', 
-        '', 
-        text
-    )
+    return re.sub(r"[\u2300-\u25ff\u2700-\u27bf\ue000-\uf8ff]|[\ud800-\udbff][\udc00-\udfff]", "", text)
 
 
 class PtyShell:
@@ -111,8 +107,8 @@ class PtyShell:
         self.shell_name = os.path.basename(self.inner_shell)
         self.shell_pid = None
         self.shell_state = "starting"  # starting|idle|busy
-        self._exec_lock = threading.Lock()   # one kai command at a time
-        self._cap_buf = None                  # bytes buffer while capturing
+        self._exec_lock = threading.Lock()  # one kai command at a time
+        self._cap_buf = None  # bytes buffer while capturing
         self._cap_done = threading.Event()
         self._cap_exit = None
 
@@ -617,7 +613,7 @@ class PtyShell:
         try:
             self.shell_state = "busy"
             self._cap_buf = bytearray()
-            
+
             # Snapshot the baseline prompt (last non-empty line of current terminal state)
             baseline_tail = ""
             if self.output_history:
@@ -628,9 +624,9 @@ class PtyShell:
                 hist_lines = [line for line in clean_hist.split("\n") if line.strip()]
                 if hist_lines:
                     baseline_tail = hist_lines[-1].strip()
-                    
+
             os.write(self.master_fd, command.encode() + b"\n")
-            
+
             # Wait for silence to assume command completion
             start = time.time()
             last_len = 0
@@ -643,21 +639,21 @@ class PtyShell:
                     last_len = curr_len
                 elif time.time() - silence_start > 0.5:
                     break
-            
+
             raw = bytes(self._cap_buf)
             nl = raw.find(b"\n")
-            body = raw[nl + 1:] if nl != -1 else raw
+            body = raw[nl + 1 :] if nl != -1 else raw
             self.shell_state = "idle"
             clean_out = _strip_unicode(_strip_ansi(body).decode("utf-8", "replace"))
-            
-            lines = clean_out.split('\n')
+
+            lines = clean_out.split("\n")
             while lines and not lines[-1].strip():
                 lines.pop()
-                
+
             # Dynamic Cleanup: If the bottom line of output exactly matches the baseline prompt tail, drop it!
             if lines and baseline_tail and lines[-1].strip() == baseline_tail:
                 lines.pop()
-            
+
             return "\n".join(lines).strip(), 0
         finally:
             self._cap_buf = None

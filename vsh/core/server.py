@@ -1,25 +1,28 @@
-"""Kai sidecar HTTP bridge for a live vsh shell.
+"""HTTP bridge exposing a live PtyShell over loopback for kai to drive.
 
-Exposes the running PtyShell over loopback HTTP so kai's discovery
-(/tools + /execute_tool, see core/sidecar.py) can drive it as a tool.
+Endpoints: /health, /tools (schema), /io/output (scrollback),
+/execute_tool (run a command via PtyShell.exec_command).
 ponytail: stdlib http.server, no aiohttp dep; one live shell, loopback only.
 """
+
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 def _tools_schema(shell):
-    return [{
-        "name": "vsh_run_command",
-        "description": (
-            f"Run a shell command in the user's live {shell.shell_name} session "
-            "(pid {}) and return its output + exit code. Fails if the shell is "
-            "busy.".format(shell.shell_pid)
-        ),
-        "keywords": ["vsh", "shell", "run", "command", "live"],
-        "params": {"command": {"type": "str", "required": True}},
-    }]
+    return [
+        {
+            "name": "vsh_run_command",
+            "description": (
+                f"Run a shell command in the user's live {shell.shell_name} session "
+                "(pid {}) and return its output + exit code. Fails if the shell is "
+                "busy.".format(shell.shell_pid)
+            ),
+            "keywords": ["vsh", "shell", "run", "command", "live"],
+            "params": {"command": {"type": "str", "required": True}},
+        }
+    ]
 
 
 def make_handler(shell):
@@ -37,17 +40,20 @@ def make_handler(shell):
 
         def do_GET(self):
             if self.path.rstrip("/") == "/health":
-                self._send(200, {
-                    "status": "ok",
-                    "shell": shell.shell_name,
-                    "pid": shell.shell_pid,
-                    "state": shell.shell_state,
-                })
+                self._send(
+                    200,
+                    {
+                        "status": "ok",
+                        "shell": shell.shell_name,
+                        "pid": shell.shell_pid,
+                        "state": shell.shell_state,
+                    },
+                )
             elif self.path.rstrip("/") == "/tools":
-                self._send(200, {"instance_id": f"vsh:{shell.shell_name}",
-                                 "tools": _tools_schema(shell)})
+                self._send(200, {"instance_id": f"vsh:{shell.shell_name}", "tools": _tools_schema(shell)})
             elif self.path.rstrip("/") == "/io/output":
                 from vsh.core.pty_shell import _strip_ansi, _strip_unicode
+
                 raw = b"".join(shell.output_history)
                 clean = _strip_unicode(_strip_ansi(raw).decode("utf-8", "replace"))
                 self._send(200, {"output": clean})
@@ -63,10 +69,7 @@ def make_handler(shell):
                 req = json.loads(self.rfile.read(n) or b"{}")
                 cmd = (req.get("arg") or {}).get("command", "")
                 out, code = shell.exec_command(cmd)
-                self._send(200, {"status": "ok",
-                                 "command": cmd,
-                                 "output": out,
-                                 "exit_code": code})
+                self._send(200, {"status": "ok", "command": cmd, "output": out, "exit_code": code})
             except Exception as e:
                 self._send(200, {"status": "error", "output": str(e)})
 
