@@ -116,6 +116,43 @@ def main(
 
     pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
 
+    # KAI Integration: Auto-serve if running inside herdr
+    pane_id = os.environ.get("HERDR_PANE_ID")
+    sess_file = None
+    if pane_id:
+        import socket
+        import uuid
+        import json
+        import time
+        from pathlib import Path
+        
+        serve = True
+        if port == 8770:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+            s.close()
+            
+        sess_file = Path.home() / ".kai" / "vsh_sessions.json"
+        try:
+            sess_file.parent.mkdir(parents=True, exist_ok=True)
+            recs = {}
+            if sess_file.exists():
+                with open(sess_file, "r") as f:
+                    recs = json.load(f)
+            recs[pane_id] = {
+                "session_id": uuid.uuid4().hex[:12],
+                "pane_id": pane_id,
+                "label": "",
+                "cwd": os.environ.get("HERDR_ACTIVE_PANE_CWD", os.getcwd()),
+                "vsh_port": port,
+                "created": time.time(),
+            }
+            with open(sess_file, "w") as f:
+                json.dump(recs, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to register herdr session: {e}")
+
     if serve:
         from vsh.core.server import serve as serve_http
 
@@ -125,6 +162,18 @@ def main(
         pty_shell.run()
     except Exception as e:
         logger.error(f"Shell crashed: {e}")
+    finally:
+        if pane_id and sess_file and sess_file.exists():
+            try:
+                import json
+                with open(sess_file, "r") as f:
+                    recs = json.load(f)
+                if pane_id in recs:
+                    del recs[pane_id]
+                    with open(sess_file, "w") as f:
+                        json.dump(recs, f, indent=2)
+            except Exception:
+                pass
 
 
 @app.command()
