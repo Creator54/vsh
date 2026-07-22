@@ -27,6 +27,8 @@ def resolve_stt(config: VshConfig):
 
 
 def resolve_tts(config: VshConfig):
+    if config.tts.provider in ("", "none"):
+        return None
     factory = _TTS_REGISTRY.get(config.tts.provider)
     return factory(config) if factory else None
 

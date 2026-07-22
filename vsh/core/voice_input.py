@@ -1,8 +1,21 @@
 import queue
+import re
 import threading
 import time
 
 from loguru import logger
+
+_SILENCE_HALLUCINATIONS = {
+    "subtitles by the amara org community",
+    "thank you for watching",
+    "thanks for watching",
+}
+
+
+def _is_silence_hallucination(text: str) -> bool:
+    """Recognize stock Whisper captions commonly produced from non-speech."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+    return normalized in _SILENCE_HALLUCINATIONS
 
 
 class VoiceInputThread(threading.Thread):
@@ -99,7 +112,15 @@ class VoiceInputThread(threading.Thread):
                             )
                         )
 
-                        if audio_chunks and self.is_listening and getattr(stream, "last_capture_had_speech", False):
+                        # Ignore very short VAD bursts.  Keyboard clicks, bumps, and
+                        # transient fan noise can satisfy the energy gate, but are
+                        # not long enough to be a deliberate voice command.
+                        min_chunks = 8  # ~0.5s at the default 16 kHz/1024 chunk size
+                        if (
+                            len(audio_chunks) >= min_chunks
+                            and self.is_listening
+                            and getattr(stream, "last_capture_had_speech", False)
+                        ):
                             # Log phrase capture
                             if self.verbose:
                                 logger.info(f"Captured phrase: {len(audio_chunks)} chunks")
@@ -107,6 +128,10 @@ class VoiceInputThread(threading.Thread):
                             # Transcribe the accumulated speech
                             text = self.stt_provider.transcribe_stream(iter(audio_chunks))
                             text = text.strip()
+
+                            if _is_silence_hallucination(text):
+                                logger.debug("Ignored probable silence hallucination: {!r}", text)
+                                continue
 
                             if text:
                                 # We have valid human speech! Lock the mic and show Processing.

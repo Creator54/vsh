@@ -1,9 +1,12 @@
+import base64
 import collections
 import fcntl
+import json
 import os
 import pty
 import queue
 import re
+import secrets
 import select
 import signal
 import struct
@@ -12,14 +15,18 @@ import termios
 import threading
 import time
 import tty
+from dataclasses import dataclass
 
 from loguru import logger
 
 from vsh.core.config import VshConfig
 from vsh.core.voice_input import VoiceInputThread
 
-# ANSI escape sequences for cursor control and terminal title
-CURSOR_DEFAULT = b"\033]112\a\033[0 q\033]0;vsh\a"
+# ANSI escape sequences for cursor control.
+CURSOR_RESET = b"\033]112\a\033[0 q"
+
+_GRAPHICS_RESPONSE = rb"\x1b_Gi={image_id}(?:,[^;]*)?;[ -~]*\x1b\\"
+_DEVICE_ATTRIBUTES_RESPONSE = re.compile(rb"\x1b\[\?[0-9;]*c")
 
 # Strip ANSI/OSC (incl. trailing partial OSC) from captured command output.
 _ANSI = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-_][0-?]*[ -/]*[@-~]")
@@ -34,12 +41,63 @@ def _strip_unicode(text: str) -> str:
     return re.sub(r"[\u2300-\u25ff\u2700-\u27bf\ue000-\uf8ff]|[\ud800-\udbff][\udc00-\udfff]", "", text)
 
 
+@dataclass(frozen=True)
+class VoiceReply:
+    speech: str = ""
+    command: str = ""
+
+
+def parse_voice_reply(raw: str) -> VoiceReply:
+    """Parse the strict voice-shell contract, falling back safely to speech."""
+    text = str(raw or "").strip()
+    if not text:
+        return VoiceReply()
+    try:
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise ValueError("voice reply must be an object")
+        speech = payload.get("speech")
+        command = payload.get("command")
+        if speech is not None and not isinstance(speech, str):
+            raise ValueError("speech must be a string or null")
+        if command is not None and not isinstance(command, str):
+            raise ValueError("command must be a string or null")
+        return VoiceReply((speech or "").strip(), (command or "").strip())
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return VoiceReply(speech=text)
+
+
+def _voice_prompt(transcript: str, mode: str) -> str:
+    rules = {
+        "command_only": "Set speech to an empty string and command to the requested Fish command.",
+        "speak_only": "Set speech to a concise response and command to null.",
+        "speak_and_command": (
+            "Set speech to a concise response. Set command to the Fish command when one should run, otherwise null."
+        ),
+    }
+    rule = rules.get(mode, rules["speak_and_command"])
+    return (
+        "Return exactly one JSON object and no markdown: "
+        '{"speech":"brief response","command":null}. '
+        "The command value must be either a Fish command string or null. "
+        f"{rule} Never put prose in command.\n\nUser request: {transcript}"
+    )
+
+
 class PtyShell:
-    def __init__(self, config: VshConfig, thinker=None, verbose: bool = False, tts_provider=None):
+    def __init__(
+        self,
+        config: VshConfig,
+        thinker=None,
+        verbose: bool = False,
+        tts_provider=None,
+        voice_handler=None,
+    ):
         self.config = config
         self.thinker = thinker
         self.verbose = verbose
         self.tts_provider = tts_provider
+        self.voice_handler = voice_handler
 
         # Precompute keybind triggers to avoid loop overhead
         k = self.config.keybinds.toggle_listen.lower()
@@ -62,8 +120,8 @@ class PtyShell:
             else:
                 self.triggers = [b"\x1c", b"\x1b[92;5u", b"\x1b[92;133u", b"\x1b[28;5u", b"\x1b[28;133u"]  # default
 
-        # Always provide Ctrl+G as a fallback (5u = Ctrl, 133u = Ctrl+NumLock)
-        fallback_triggers = [b"\x07", b"\x1b[103;5u", b"\x1b[103;133u"]
+        # Keep Ctrl+G and Ctrl+] available alongside configured triggers.
+        fallback_triggers = [b"\x07", b"\x1d", b"\x1b[103;5u", b"\x1b[103;133u"]
         for t in fallback_triggers:
             if t not in self.triggers:
                 self.triggers.append(t)
@@ -82,7 +140,6 @@ class PtyShell:
 
         self.master_fd = None
         self.stt_queue = queue.Queue()
-        self.tts_queue = queue.Queue()
         self.voice_thread = VoiceInputThread(
             self.stt_queue,
             config=self.config,
@@ -94,7 +151,6 @@ class PtyShell:
             state_callback=self._set_cursor_state,
         )
         self.pipeline_thread = None
-        self.tts_worker = None
         self.is_listening = False
         self.old_tty_attrs = None
         self._interrupted = False
@@ -102,12 +158,22 @@ class PtyShell:
         self.rows = 24
         self._last_energy = 0
         self._anim_frame = 0
+        self._visual_mode = "none"
+        self._pending_input = b""
+        self._image_id = secrets.randbelow(2**31 - 1) + 1
+        self._placement_id = 1
+        self._graphics_visible = False
+        self._last_graphics_signature = None
+        self._last_graphics_render = 0.0
+        self._typing_until = 0.0
+        self._alternate_screen = False
+        self._pty_control_tail = b""
 
-        # Shell identity + live exec state (exposed over HTTP for kai/remote).
+        # Shell identity and live execution state exposed over HTTP.
         self.shell_name = os.path.basename(self.inner_shell)
         self.shell_pid = None
         self.shell_state = "starting"  # starting|idle|busy
-        self._exec_lock = threading.Lock()  # one kai command at a time
+        self._exec_lock = threading.Lock()
         self._cap_buf = None  # bytes buffer while capturing
         self._cap_done = threading.Event()
         self._cap_exit = None
@@ -127,59 +193,17 @@ class PtyShell:
             if self.verbose:
                 logger.info(f"Processing: {transcript}")
 
-            if self.thinker:
+            processor = self.voice_handler or self.thinker
+            if processor:
                 self._set_cursor_state("thinking")
                 try:
-                    mode = getattr(self.config.llm, "output_mode", "speak_and_command")
-                    if mode == "command_only":
-                        prompt = (
-                            "You are a shell assistant. Output ONLY the raw executable shell command. Do not use markdown formatting. Do not provide explanations or be verbose.\n\nUser request: "
-                            + transcript
-                        )
-                    elif mode == "speak_only":
-                        prompt = (
-                            "You are a shell assistant. Provide a highly concise conversational reply. Do not be verbose. Do not output executable commands.\n\nUser request: "
-                            + transcript
-                        )
-                    else:
-                        prompt = (
-                            "You are a shell assistant. Provide a highly concise conversational reply, and enclose the executable shell command inside a single ```bash code block. Do not be verbose.\n\nUser request: "
-                            + transcript
-                        )
-
-                    raw_response = self.thinker.ask(prompt)
-
-                    speech_text = ""
-                    command_text = ""
-
-                    if mode == "command_only":
-                        command_text = raw_response.strip()
-                    elif mode == "speak_only":
-                        speech_text = raw_response.strip()
-                    else:
-                        # Parse markdown blocks
-                        import re
-
-                        blocks = re.findall(r"```(?:bash|sh)?\n?(.*?)```", raw_response, re.DOTALL)
-                        if blocks:
-                            command_text = "\n".join(b.strip() for b in blocks)
-                            speech_text = re.sub(r"```(?:bash|sh)?\n?.*?```", "", raw_response, flags=re.DOTALL).strip()
-                        else:
-                            # Fallback if the LLM forgot the block
-                            speech_text = raw_response.strip()
-
-                    self._set_cursor_state("typing")
-                    if command_text:
-                        self._inject_command(command_text)
-
-                    # Queue TTS response if enabled
-                    if self.tts_provider and speech_text:
-                        self._set_cursor_state("speaking")
-                        self.tts_queue.put(speech_text)
-                    else:
-                        self._set_cursor_state("idle")
+                    prompt = transcript
+                    if not self.voice_handler:
+                        mode = getattr(self.config.llm, "output_mode", "speak_and_command")
+                        prompt = _voice_prompt(transcript, mode)
+                    self._dispatch_response(processor.ask(prompt))
                 except Exception as e:
-                    sys.stderr.write(f"\r\n[vsh] Thinker Error: {e}\r\n")
+                    self._publish_reply(f"vsh: {e}", "")
                     self._set_cursor_state("idle")
             else:
                 # Direct injection
@@ -188,26 +212,32 @@ class PtyShell:
 
             self.stt_queue.task_done()
 
-    def _tts_worker(self):
-        """Background worker to handle TTS synthesis and playback without blocking the shell."""
-        while True:
-            text = self.tts_queue.get()
-            if text is None:
-                break
-            try:
-                wav = self.tts_provider.synthesize(text)
-                # Convert to int16 bytes
-                data = (wav * 32767 * 0.9).astype("int16").tobytes()
-                from vsh.core.audio import play_audio
+    def _speak(self, text: str) -> bool:
+        """Play speech synchronously in the pipeline thread so commands follow it."""
+        try:
+            wav = self.tts_provider.synthesize(text)
+            data = (wav * 32767 * 0.9).astype("int16").tobytes()
+            from vsh.core.audio import play_audio
 
-                # Use the configured device index for TTS if available
-                dev = self.config.tts.device_index if hasattr(self.config.tts, "device_index") else None
-                play_audio(data, 44100, device_index=dev)
-            except Exception as e:
-                logger.error(f"TTS Error: {e}")
-            finally:
-                self._set_cursor_state("idle")
-                self.tts_queue.task_done()
+            play_audio(data, 44100, device_index=self.config.tts.device_index)
+            return True
+        except Exception as e:
+            logger.error(f"TTS Error: {e}")
+            return False
+
+    def _dispatch_response(self, raw: str):
+        """Speak or print response text first, then hand the command to Fish."""
+        reply = parse_voice_reply(raw)
+        visible_speech = reply.speech
+        if reply.speech and self.tts_provider:
+            self._set_cursor_state("speaking")
+            if self._speak(reply.speech):
+                visible_speech = ""
+        if reply.command:
+            self._set_cursor_state("typing")
+        if visible_speech or reply.command:
+            self._publish_reply(visible_speech, reply.command)
+        self._set_cursor_state("idle")
 
     def _setup_terminal(self):
         """Save terminal state and enter raw mode (skip if no TTY, e.g. --serve)."""
@@ -217,20 +247,77 @@ class PtyShell:
         self.old_tty_attrs = termios.tcgetattr(sys.stdin.fileno())
         tty.setraw(sys.stdin.fileno())
 
+    def _probe_graphics_support(self, timeout: float = 0.25) -> bool:
+        """Ask the outer terminal whether it supports the Kitty graphics protocol."""
+        if self.old_tty_attrs is None:
+            return False
+
+        image_id = str(self._image_id).encode()
+        query = b"\033_Gi=" + image_id + b",s=1,v=1,a=q,t=d,f=24;AAAA\033\\\033[c"
+        sys.stdout.buffer.write(self._terminal_sequence(query))
+        sys.stdout.buffer.flush()
+
+        response = bytearray()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            ready, _, _ = select.select([sys.stdin.fileno()], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(sys.stdin.fileno(), 1024)
+            if not chunk:
+                break
+            response.extend(chunk)
+            if _DEVICE_ATTRIBUTES_RESPONSE.search(response):
+                break
+
+        graphics_response = re.compile(_GRAPHICS_RESPONSE.replace(b"{image_id}", image_id))
+        graphics_match = graphics_response.search(response)
+        attributes_match = _DEVICE_ATTRIBUTES_RESPONSE.search(response)
+        supported = bool(graphics_match and (not attributes_match or graphics_match.start() < attributes_match.start()))
+
+        pending = graphics_response.sub(b"", bytes(response))
+        pending = _DEVICE_ATTRIBUTES_RESPONSE.sub(b"", pending)
+        self._pending_input += pending
+        return supported
+
+    @staticmethod
+    def _terminal_sequence(sequence: bytes) -> bytes:
+        """Pass Kitty control sequences through tmux when passthrough is enabled."""
+        if os.environ.get("TMUX"):
+            # tmux DCS passthrough requires embedded ESC bytes to be doubled.
+            return b"\033Ptmux;" + sequence.replace(b"\033", b"\033\033") + b"\033\\"
+        return sequence
+
+    def _select_visual_mode(self):
+        """Resolve auto/kitty/none to the renderer used for this terminal session."""
+        configured = getattr(self.config.shell, "overlay_mode", "auto").lower()
+        if configured not in ("auto", "kitty", "none"):
+            logger.warning("Unknown overlay mode {!r}; using auto", configured)
+            configured = "auto"
+        if configured == "none" or self.old_tty_attrs is None:
+            self._visual_mode = "none"
+        elif configured == "kitty" or self._probe_graphics_support():
+            self._visual_mode = "graphics"
+        else:
+            self._visual_mode = "cursor"
+
     def _restore_terminal(self):
-        """Restore original terminal state and cursor."""
-        if self.old_tty_attrs:
+        """Remove VSH visuals and restore the original terminal state."""
+        if not self.old_tty_attrs:
+            return
+        try:
+            if self._visual_mode == "graphics":
+                self._delete_graphics_badge()
+            elif self._visual_mode == "cursor":
+                sys.stdout.buffer.write(CURSOR_RESET)
+                sys.stdout.buffer.flush()
+        except (OSError, ValueError, termios.error):
+            pass
+        try:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, self.old_tty_attrs)
-            # Clear any reserved HUD row so it doesn't linger in the scrollback
-            if getattr(self.config.shell, "overlay_mode", "cursor") in ("statusline", "cursor"):
-                try:
-                    rows = self.rows
-                    line = rows  # statusline HUD is always the bottom row (PTY is shrunk by 1)
-                    sys.stdout.buffer.write(f"\033[{line};1H\033[K".encode())
-                except Exception:
-                    pass
-            sys.stdout.buffer.write(CURSOR_DEFAULT)
-            sys.stdout.buffer.flush()
+        except (OSError, ValueError, termios.error):
+            pass
 
     def _handle_sigint(self, signum, frame):
         """Graceful interrupt flag for Ctrl+C."""
@@ -247,13 +334,7 @@ class PtyShell:
             rows, cols = struct.unpack("hh", buf)
             self.rows, self.cols = rows, cols
 
-            # In "statusline" and "cursor" overlay modes, reserve one row for the HUD so
-            # the inner shell never paints over it (fully transparent, no typing collision).
-            mode = getattr(self.config.shell, "overlay_mode", "cursor")
-            pty_rows = (rows - 1) if mode in ("statusline", "cursor") else rows
-
-            # Set it on the PTY
-            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", max(1, pty_rows), cols, 0, 0))
+            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", max(1, rows), cols, 0, 0))
         except Exception:
             pass
 
@@ -277,12 +358,7 @@ class PtyShell:
             self._set_cursor_state(state)
 
     def _set_cursor_state(self, state: str, text: str = None):
-        """Update internal state + overlay. Only the legacy "cursor" mode recolors the
-        terminal cursor; in "statusline"/"none" modes the overlay must stay transparent
-        and must NOT touch the user's cursor (that was the whole point)."""
-        if text is not None:
-            self._current_transcript = text
-            self._transcript_time = time.time()
+        """Update pipeline state and its visual indicator."""
 
         if state in ("transcribing", "thinking", "typing", "speaking"):
             self._pipeline_state = state
@@ -294,27 +370,31 @@ class PtyShell:
                 self.voice_thread.is_processing = False
 
         self._current_cursor_state = state
+        if self._visual_mode == "cursor":
+            self._render_cursor_state(state)
+        elif self._visual_mode == "graphics":
+            self._render_graphics_badge()
 
-        # Only pollute the cursor in legacy "cursor" mode. Transparent modes skip this.
-        if getattr(self.config.shell, "overlay_mode", "cursor") == "cursor":
-            if state == "listening_active":
-                sys.stdout.buffer.write(b"\033]12;#ff00ff\a\033[1 q")  # Bright Pink blink
-            elif state == "listening_idle":
-                sys.stdout.buffer.write(b"\033]12;#880000\a\033[1 q")  # Dark Red blink
-            elif state == "transcribing":
-                sys.stdout.buffer.write(b"\033]12;#00ffff\a\033[1 q")  # Cyan
-            elif state == "thinking":
-                sys.stdout.buffer.write(b"\033]12;#ffa500\a\033[3 q")  # Orange underline
-            elif state in ("typing", "speaking"):
-                sys.stdout.buffer.write(b"\033]12;#00ff00\a\033[4 q")  # Green underline
-            else:
-                sys.stdout.buffer.write(CURSOR_DEFAULT)
+    def _user_started_typing(self):
+        self._typing_until = time.monotonic() + 0.6
+        if self._visual_mode == "graphics":
+            self._delete_graphics_badge()
+        elif self._visual_mode == "cursor":
+            self._render_cursor_state("typing")
 
-        sys.stdout.buffer.flush()
-        self._render_ui()
+    def _track_pty_controls(self, data: bytes):
+        """Track alternate-screen transitions without parsing the whole VT stream."""
+        stream = self._pty_control_tail + data
+        for match in re.finditer(rb"\x1b\[\?(1049|1047|47)(h|l)", stream):
+            entering = match.group(2) == b"h"
+            if entering != self._alternate_screen:
+                self._alternate_screen = entering
+                if entering and self._visual_mode == "graphics":
+                    self._delete_graphics_badge()
+        self._pty_control_tail = stream[-16:]
 
     def _notify(self, msg: str, color="36"):
-        """Legacy text notify for verbose mode only."""
+        """Verbose notification for startup and toggle diagnostics."""
         if self.verbose:
             sys.stdout.buffer.write(f"\r\n\033[{color}m[vsh]\033[0m {msg}\r\n".encode())
             sys.stdout.buffer.flush()
@@ -349,6 +429,47 @@ class PtyShell:
         except OSError as e:
             logger.error(f"Failed to write to PTY: {e}")
 
+    @staticmethod
+    def _write_bridge_file(path: str, content: str):
+        pending = f"{path}.{secrets.token_hex(4)}.tmp"
+        with open(pending, "x", encoding="utf-8") as stream:
+            stream.write(content)
+        os.chmod(pending, 0o600)
+        os.replace(pending, path)
+
+    def _publish_reply(self, speech: str, command: str):
+        """Publish speech and command as one ordered terminal update."""
+        is_fish = self.shell_name.lower().rsplit("-", 1)[-1] == "fish"
+        if self.config.shell.response_bridge == "fish-signal" and self.shell_pid and is_fish:
+            base = os.environ.get("XDG_RUNTIME_DIR")
+            runtime = os.path.join(base, "vsh") if base else os.path.expanduser("~/.vsh/run")
+            os.makedirs(runtime, mode=0o700, exist_ok=True)
+            os.chmod(runtime, 0o700)
+            paths = {
+                "response": os.path.join(runtime, f"{self.shell_pid}.response"),
+                "command": os.path.join(runtime, f"{self.shell_pid}.command"),
+                "submit": os.path.join(runtime, f"{self.shell_pid}.submit"),
+            }
+            for path in paths.values():
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+            if speech:
+                self._write_bridge_file(paths["response"], speech.rstrip() + "\n")
+            if command:
+                self._write_bridge_file(paths["command"], command)
+                if self.config.shell.auto_submit:
+                    self._write_bridge_file(paths["submit"], "1\n")
+            os.kill(self.shell_pid, signal.SIGUSR1)
+            return
+
+        if speech:
+            sys.stdout.write(f"\r\n{speech.rstrip()}\r\n")
+            sys.stdout.flush()
+        if command:
+            self._inject_command(command)
+
     def run(self):
         """Main entry point: fork PTY, start threads, and multiplex I/O."""
         # Set recursion guard so inner shell doesn't spawn vsh again
@@ -370,6 +491,8 @@ class PtyShell:
 
             # Setup signal handlers
             signal.signal(signal.SIGINT, self._handle_sigint)
+            signal.signal(signal.SIGTERM, self._handle_sigint)
+            signal.signal(signal.SIGHUP, self._handle_sigint)
             signal.signal(signal.SIGWINCH, self._handle_sigwinch)
             self._handle_sigwinch(None, None)
 
@@ -380,12 +503,9 @@ class PtyShell:
             self.pipeline_thread = threading.Thread(target=self._pipeline_worker, daemon=True)
             self.pipeline_thread.start()
 
-            if self.tts_provider:
-                self.tts_worker = threading.Thread(target=self._tts_worker, daemon=True)
-                self.tts_worker.start()
-
             # Setup raw mode
             self._setup_terminal()
+            self._select_visual_mode()
 
             # Defer UI updates slightly so the inner shell doesn't overwrite them
             def show_startup_ui():
@@ -409,8 +529,6 @@ class PtyShell:
                 self.voice_thread.stop()
                 self.voice_thread.join(timeout=2.0)
                 self.stt_queue.put(None)  # Signal pipeline to stop
-                if self.tts_provider:
-                    self.tts_queue.put(None)
                 # Graceful child shutdown with timeout
                 for _ in range(50):  # 5 seconds
                     try:
@@ -428,179 +546,168 @@ class PtyShell:
                     except ProcessLookupError:
                         pass
 
-    def _render_statusline(self):
-        """Transparent overlay: draw the HUD on a dedicated reserved row.
-
-        The PTY is shrunk by one row (see _handle_sigwinch), so this line never
-        overlaps the inner shell's content. No save/restore-cursor into the user's
-        own scrollback, no tearing under fzf/nvim/htop.
-        """
-        state = getattr(self, "_current_cursor_state", "idle")
-        mode = getattr(self.config.shell, "overlay_mode", "cursor")
-        if mode != "statusline":
-            return
-
-        rows, cols = self.rows, self.cols
-        line = rows  # statusline HUD is always the bottom row (PTY is shrunk by 1)
-
-        # Determine label text (no braille indicators in the reserved row; use plain text)
-        labels = {
-            "idle": "Idle",
-            "listening_idle": "Listening…",
-            "listening_active": "Listening ●",
-            "transcribing": "Transcribing…",
-            "thinking": "Thinking…",
-            "typing": "Typing…",
-            "speaking": "Speaking…",
-        }
-        label = labels.get(state, "Idle")
-
-        show_text = getattr(self.config.shell, "show_state_text", True)
-        show_transcript = getattr(self.config.shell, "show_transcript", True)
-
-        left = f"vsh: {label}" if show_text else "vsh"
-
-        # Optional transcript on the same line (clipped to remaining width)
-        right = ""
-        if show_transcript and state in ("transcribing", "thinking") and getattr(self, "_current_transcript", ""):
-            t = self._current_transcript.replace("\n", " ").replace("\r", "")
-            max_len = max(0, cols - len(left) - 3)
-            if len(t) > max_len:
-                t = t[: max_len - 1] + "…"
-            right = t
-
-        color = getattr(self.config.shell, "overlay_color", "36")
-        gap = "  " if right else ""
-        content = f"\033[{color}m{left}\033[0m{gap}{right}"
-
-        # Pad to full width and clear the whole line so nothing lingers
-        padded = content.ljust(cols)[:cols]
-        # Move to the reserved row, col 1; clear line; write; restore cursor.
-        seq = f"\033[s\033[{line};1H\033[K{padded}\033[u"
-        sys.stdout.buffer.write(seq.encode())
+    def _render_cursor_state(self, state: str):
+        """Fallback indicator that never writes into terminal cells."""
+        if not self.is_listening:
+            sequence = CURSOR_RESET
+        else:
+            state = "listening_idle" if state == "idle" else state
+            sequence = {
+                "listening_idle": b"\033]12;#00d2ff\a\033[6 q",
+                "listening_active": b"\033]12;#ff00b4\a\033[1 q",
+                "transcribing": b"\033]12;#00d2ff\a\033[3 q",
+                "thinking": b"\033]12;#ffae00\a\033[4 q",
+                "typing": b"\033]12;#32dc64\a\033[6 q",
+                "speaking": b"\033]12;#32dc64\a\033[5 q",
+            }.get(state, CURSOR_RESET)
+        sys.stdout.buffer.write(sequence)
         sys.stdout.buffer.flush()
 
-    def _render_ui(self):
-        """Render the 3-character state indicator and text in the top-right corner.
+    def _icon_pixels(self, state: str, phase: int) -> bytes:
+        """Build a tiny transparent RGBA icon without an image dependency."""
+        colors = {
+            "listening_idle": (0, 210, 255),
+            "listening_active": (255, 0, 180),
+            "transcribing": (0, 210, 255),
+            "thinking": (255, 174, 0),
+            "typing": (50, 220, 100),
+            "speaking": (50, 220, 100),
+        }
+        state = "listening_idle" if state == "idle" else state
+        color = colors.get(state, colors["listening_idle"])
+        pixels = bytearray(16 * 16 * 4)
 
-        Legacy "cursor" overlay mode. New transparent "statusline" mode is handled
-        separately in _render_statusline().
-        """
-        mode = getattr(self.config.shell, "overlay_mode", "cursor")
-        if mode == "statusline":
-            self._render_statusline()
+        def put(x: int, y: int, alpha: int = 255):
+            if 0 <= x < 16 and 0 <= y < 16:
+                offset = (y * 16 + x) * 4
+                pixels[offset : offset + 4] = (*color, alpha)
+
+        def hline(x1: int, x2: int, y: int, alpha: int = 255):
+            for x in range(x1, x2 + 1):
+                put(x, y, alpha)
+
+        def vline(x: int, y1: int, y2: int, alpha: int = 255):
+            for y in range(y1, y2 + 1):
+                put(x, y, alpha)
+
+        if state == "listening_idle":
+            # Soft breathing orb, matching the old `•` / `(•)` / `◖•◗` HUD.
+            put(7, 7)
+            put(8, 7)
+            put(7, 8)
+            put(8, 8)
+            rings = (
+                ((5, 7), (10, 7), (7, 5), (7, 10)),
+                ((4, 7), (11, 7), (7, 4), (7, 11), (5, 5), (10, 5), (5, 10), (10, 10)),
+                ((3, 7), (12, 7), (7, 3), (7, 12), (4, 4), (11, 4), (4, 11), (11, 11)),
+                ((2, 7), (13, 7), (7, 2), (7, 13), (3, 3), (12, 3), (3, 12), (12, 12)),
+            )
+            for x, y in rings[phase % len(rings)]:
+                put(x, y, 170 if phase < 3 else 120)
+        elif state == "listening_active":
+            # Responsive audio bars, replacing the literal microphone glyph.
+            threshold = max(1, getattr(self, "_last_threshold", self.config.stt.vad_threshold))
+            energy = getattr(self, "_last_energy", 0)
+            level = 1 if energy <= threshold * 2.5 else 2 if energy <= threshold * 5 else 3
+            heights = (3, 6, 9, 6, 3)
+            for index, x in enumerate(range(3, 13, 2)):
+                height = min(9, heights[(index + phase) % len(heights)] + level)
+                top = 8 - height // 2
+                vline(x, top, top + height - 1)
+        elif state == "transcribing":
+            heights = (2, 5, 8, 3, 6, 10, 4, 7, 3, 9, 5, 2)
+            for index, x in enumerate(range(2, 14)):
+                height = heights[(index + phase) % len(heights)]
+                top = 8 - height // 2
+                vline(x, top, top + height - 1)
+        elif state == "thinking":
+            for index, x in enumerate((4, 8, 12)):
+                alpha = 255 if index == phase % 3 else 100
+                for px in (x - 1, x):
+                    for py in (7, 8):
+                        put(px, py, alpha)
+        elif state == "typing":
+            hline(2, 13, 4)
+            hline(2, 13, 12)
+            vline(2, 5, 11)
+            vline(13, 5, 11)
+            for x in (4, 7, 10):
+                put(x, 7)
+            for x in (4, 6, 8, 10):
+                put(x, 9)
+            hline(5, 10, 11)
+            if phase % 2:
+                vline(11, 8, 10)
+        elif state == "speaking":
+            vline(3, 7, 9)
+            vline(4, 6, 10)
+            vline(5, 5, 11)
+            vline(6, 4, 12)
+            arcs = (
+                ((9, 6), (10, 7), (10, 9), (9, 10)),
+                ((11, 4), (12, 5), (13, 7), (13, 9), (12, 11), (11, 12)),
+            )
+            for arc in arcs[: 1 + phase % 2]:
+                for x, y in arc:
+                    put(x, y)
+
+        return bytes(pixels)
+
+    def _delete_graphics_badge(self):
+        if not self._graphics_visible:
             return
-        if mode == "none":
+        sequence = f"\033_Ga=d,d=I,i={self._image_id},p={self._placement_id},q=2;\033\\".encode()
+        sys.stdout.buffer.write(self._terminal_sequence(sequence) + b"\033[?25h")
+        sys.stdout.buffer.flush()
+        self._graphics_visible = False
+        self._last_graphics_signature = None
+
+    def _render_graphics_badge(self):
+        """Render the animated two-cell state cursor at the current terminal cursor."""
+        if (
+            not self.is_listening
+            or self.cols < 2
+            or self._alternate_screen
+            or time.monotonic() < self._typing_until
+        ):
+            self._delete_graphics_badge()
             return
 
         state = getattr(self, "_current_cursor_state", "idle")
-
-        # If the software toggle is entirely OFF, vsh goes to sleep visually.
-        # Hide the UI completely so it behaves exactly like a normal shell.
-        if not getattr(self, "is_listening", False):
-            if self.cols > 16:
-                rows = self.rows
-                # Clear the reserved HUD row (save/restore so the shell cursor is untouched)
-                sys.stdout.buffer.write(f"\033[s\033[{rows};1H\033[K\033[u".encode())
-                sys.stdout.buffer.flush()
-            return
-
-        indicator = "   "
-        text = ""
-
-        # Select indicator and text
-        braille_spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        idle_pulse = [" • ", "(•)", "◖•◗", "(•)"]
-
-        if state == "idle":
-            indicator = idle_pulse[(self._anim_frame // 4) % len(idle_pulse)]
-            text = "Idle"
-        elif state == "listening_idle":
-            if getattr(self, "_last_energy", 0) == 0:
-                indicator = " ─ "
-                text = "Mute"
-            else:
-                indicator = idle_pulse[(self._anim_frame // 4) % len(idle_pulse)]
-                text = "Idle"
-        elif state == "listening_active":
-            thr = getattr(self, "_last_threshold", getattr(self.config.stt, "vad_threshold", 1000))
-            f = self._anim_frame % 4
-            if getattr(self, "_last_energy", 0) > thr * 5:
-                indicator = ["⠿⠶⠤", "⠶⠿⠶", "⠤⠶⠿", "⠶⠿⠶"][f]
-            elif getattr(self, "_last_energy", 0) > thr * 2.5:
-                indicator = ["⠶⠤⠤", "⠤⠶⠤", "⠤⠤⠶", "⠤⠶⠤"][f]
-            else:
-                indicator = ["⠒⠤⠤", "⠤⠒⠤", "⠤⠤⠒", "⠤⠒⠤"][f]
-            text = "Listening"
-        elif state in ("transcribing", "thinking"):
-            indicator = f" {braille_spin[self._anim_frame % len(braille_spin)]} "
-            text = "Processing"
-        elif state in ("typing", "speaking"):
-            indicator = "⠶⠿⠶" if self._anim_frame % 2 == 0 else "⠤⠶⠤"
-            text = "Speaking"
-
+        phase = self._anim_frame
         self._anim_frame += 1
-
-        show_text = getattr(self.config.shell, "show_state_text", True)
-
-        if self.cols > 16:
-            if show_text:
-                # Format: indicator + space + text (padded to 10 chars)
-                display_text = f"{indicator} {text:<10}"
-            else:
-                display_text = f"{indicator}"
-
-            transcript_display = ""
-            t = ""
-
-            # Linger transcript for 3 seconds ONLY if idle (useful for Direct Injection to see what was injected)
-            linger_time = 3.0
-            time_since_transcript = time.time() - getattr(self, "_transcript_time", 0)
-            show_transcript_condition = state in ("transcribing", "thinking") or (
-                state == "idle" and time_since_transcript < linger_time
-            )
-
-            if not show_transcript_condition:
-                self._current_transcript = ""
-
-            if (
-                show_transcript_condition
-                and getattr(self.config.shell, "show_transcript", True)
-                and getattr(self, "_current_transcript", "")
-                and self.cols >= 40
-            ):
-                t = self._current_transcript.replace("\n", " ").replace("\r", "")
-                max_len = self.cols - len(display_text) - 6
-                if len(t) > max_len:
-                    t = t[: max_len - 3] + "..."
-                transcript_display = f"\033[90m{t}\033[0m "
-
-            # Draw the animated corner widget on the RESERVED bottom row (absolute
-            # position). Because the PTY is shrunk by one row (see _handle_sigwinch),
-            # this line is never the user's typing line — so it can't obscure input.
-            # We move to (rows, pos), paint, and move back to the reserved row start;
-            # no save/restore-cursor into the shell's scrollback, no \033[K clear-to-EOL.
-            color = "\033[36m" if state == "idle" else "\033[1;35m"  # Cyan for idle, Magenta for active
-
-            # Anchor the widget at the right edge of the reserved row
-            pos = max(1, self.cols - len(display_text) - 1 - (len(t) + 1 if transcript_display else 0))
-
-            last_pos = getattr(self, "_last_ui_pos", pos)
-            clear_str = ""
-            if pos > last_pos:
-                # The widget shrank (e.g. transcript disappeared). Clear the leftover
-                # text on the reserved row at its previous far-left position.
-                clear_str = f"\033[{last_pos}G\033[K"
-            self._last_ui_pos = pos
-
-            # Save the shell cursor, jump to the reserved bottom row, paint (clearing
-            # trailing chars on that row), then restore the shell cursor. Exactly like
-            # _render_statusline — no drawing happens on the user's typing line.
-            ui_str = (
-                f"\033[s\033[{self.rows};{pos}H{clear_str}{transcript_display}{color}{display_text}\033[0m\033[K\033[u"
-            )
-            sys.stdout.buffer.write(ui_str.encode())
-            sys.stdout.buffer.flush()
+        animation_phase = (
+            phase % 12
+            if state == "transcribing"
+            else phase % 3
+            if state == "thinking"
+            else phase % 4
+            if state in ("listening_idle", "listening_active")
+            else phase % 2
+        )
+        pixels = self._icon_pixels(state, animation_phase)
+        payload = base64.standard_b64encode(pixels)
+        control = (
+            f"a=T,f=32,s=16,v=16,i={self._image_id},p={self._placement_id},"
+            "c=2,r=1,C=1,z=1,q=2"
+        ).encode()
+        # Paint the badge at the top-right edge as a non-blocking HUD.  The
+        # shell cursor is saved/restored so this never inserts text or steals
+        # the user's input position.
+        row = 1
+        col = max(1, self.cols - 1)
+        sequence = (
+            f"\033[s\033[{row};{col}H\033[?25l".encode()
+            + b"\033_G"
+            + control
+            + b";"
+            + payload
+            + b"\033\\\033[u"
+        )
+        sys.stdout.buffer.write(self._terminal_sequence(sequence))
+        sys.stdout.buffer.flush()
+        self._graphics_visible = True
+        self._last_graphics_render = time.monotonic()
 
     def exec_command(self, command: str, timeout: float = 120.0):
         """Inject a command into the live shell, capture its output + exit code.
@@ -675,17 +782,22 @@ class PtyShell:
             except InterruptedError:
                 continue
 
-            # Only render UI when terminal is idle (timeout).
-            # This prevents UI ANSI sequences (like save/restore cursor) from interleaving
-            # with active terminal drawings from fzf, nvim, or htop.
             if not ready_r:
-                self._render_ui()
+                if self._visual_mode == "graphics":
+                    self._render_graphics_badge()
+                elif self._visual_mode == "cursor" and self._typing_until:
+                    if time.monotonic() >= self._typing_until:
+                        self._typing_until = 0.0
+                        self._render_cursor_state(getattr(self, "_current_cursor_state", "idle"))
 
             if self._interrupted:
                 logger.info("Interrupted by signal")
                 break
 
-            if sys.stdin.fileno() in ready_r:
+            if self._pending_input:
+                data = self._pending_input
+                self._pending_input = b""
+            elif sys.stdin.fileno() in ready_r:
                 try:
                     data = os.read(sys.stdin.fileno(), 1024)
                 except OSError:
@@ -695,16 +807,18 @@ class PtyShell:
                     # Forward EOT to child so the shell can process it gracefully
                     os.write(self.master_fd, b"\x04")
                     break
+            else:
+                data = b""
 
-                if any(t in data for t in self.triggers):
-                    for t in self.triggers:
-                        data = data.replace(t, b"")
-                    self._toggle_listening()
+            if data and any(t in data for t in self.triggers):
+                for t in self.triggers:
+                    data = data.replace(t, b"")
+                self._toggle_listening()
 
-                # Forward everything else to PTY
-                if data:
-                    self.input_history.append(data)
-                    os.write(self.master_fd, data)
+            if data:
+                self._user_started_typing()
+                self.input_history.append(data)
+                os.write(self.master_fd, data)
 
             # 2. Process PTY output
             if self.master_fd in ready_r:
@@ -719,5 +833,6 @@ class PtyShell:
                 self.output_history.append(data)
                 if self._cap_buf is not None:
                     self._cap_buf.extend(data)
+                self._track_pty_controls(data)
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()

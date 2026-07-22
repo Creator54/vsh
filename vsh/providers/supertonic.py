@@ -37,6 +37,6 @@ class SupertonicTTSProvider:
             engine = TTS(auto_download=True)
             voice_style = engine.get_voice_style(voice_name=self.voice)
 
-        # ponytail: 8 steps is a good balance of quality and speed
+        # Eight steps balance quality and speed.
         wav, _ = engine.synthesize(text=text, voice_style=voice_style, total_steps=8, speed=1.0, lang="en")
         return wav.flatten()

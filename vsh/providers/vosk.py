@@ -1,6 +1,6 @@
 import warnings
 
-# ponytail: silence deprecation noise at source
+# Silence deprecation warnings at the source.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 import json  # noqa: E402
 import os  # noqa: E402

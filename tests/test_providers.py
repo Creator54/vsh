@@ -3,10 +3,18 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
+from vsh.core.config import VshConfig
+from vsh.providers import resolve_tts
 from vsh.providers.supertonic import SupertonicTTSProvider
 
 
 class TestProviders(unittest.TestCase):
+    def test_none_disables_tts(self):
+        config = VshConfig()
+        config.tts.provider = "none"
+
+        self.assertIsNone(resolve_tts(config))
+
     @patch("supertonic.TTS")
     def test_supertonic_tts_synthesis(self, mock_tts_class):
         mock_engine = MagicMock()

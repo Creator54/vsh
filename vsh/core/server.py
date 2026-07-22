@@ -1,8 +1,7 @@
-"""HTTP bridge exposing a live PtyShell over loopback for kai to drive.
+"""Expose a live PtyShell over loopback HTTP.
 
 Endpoints: /health, /tools (schema), /io/output (scrollback),
 /execute_tool (run a command via PtyShell.exec_command).
-ponytail: stdlib http.server, no aiohttp dep; one live shell, loopback only.
 """
 
 import json

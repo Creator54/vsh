@@ -173,6 +173,30 @@ class TestCliThinker(unittest.TestCase):
         result = thinker.ask("piped text")
         self.assertEqual(result, "piped text")
 
+    def test_prompt_template_preserves_arbitrary_transcript(self):
+        transcript = "request with 'quotes', $(printf unsafe), semicolons; and spaces"
+        thinker = CliThinker(command="printf '%s' {}")
+
+        self.assertEqual(thinker.ask(transcript), transcript)
+
+    def test_prompt_template_does_not_inherit_terminal_input(self):
+        thinker = CliThinker(command="voice-handler {}")
+        completed = MagicMock(stdout="ok\n", stderr="")
+        with patch("subprocess.run", return_value=completed) as run:
+            thinker.ask("hello")
+
+        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertNotIn("input", run.call_args.kwargs)
+
+    def test_custom_timeout(self):
+        thinker = CliThinker(command="echo hello", timeout=300)
+        completed = MagicMock(stdout="hello\n", stderr="")
+        with patch("subprocess.run", return_value=completed) as run:
+            result = thinker.ask("world")
+
+        self.assertEqual(result, "hello")
+        self.assertEqual(run.call_args.kwargs["timeout"], 300)
+
     def test_timeout_fallback(self):
         thinker = CliThinker(command="sleep 5")
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="sleep 5", timeout=120)):

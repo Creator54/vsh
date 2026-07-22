@@ -12,18 +12,24 @@ from loguru import logger
 class ShellConfig:
     inner_shell: str = ""
     voice_on_start: bool = False
-    show_state_text: bool = True
-    show_transcript: bool = True
     auto_submit: bool = False
-    overlay_mode: str = "cursor"  # "cursor" (legacy corner HUD), "statusline" (reserved transparent line), "none"
-    overlay_color: str = "36"  # ANSI color code for the statusline text
+    overlay_mode: str = "auto"  # auto|kitty|none; unsupported terminals use cursor state
+    voice_handler: str = ""
+    response_bridge: str = ""
 
 
 @dataclass
 class KeybindConfig:
     toggle_listen: str = "ctrl+\\"
     toggle_listen_triggers: list[str] = field(
-        default_factory=lambda: ["1c", "1b5b39323b3575", "1b5b39323b31333375", "1b5b32383b3575", "1b5b32383b31333375"]
+        default_factory=lambda: [
+            "1c",
+            "1d",
+            "1b5b39323b3575",
+            "1b5b39323b31333375",
+            "1b5b32383b3575",
+            "1b5b32383b31333375",
+        ]
     )
 
 
@@ -251,14 +257,6 @@ def interactive_setup(section: str = None) -> None:
         voice_on_start = inquirer.confirm(
             message="Enable voice automatically on start?", default=get_val("shell", "voice_on_start", default=False)
         ).execute()
-        show_state_text = inquirer.confirm(
-            message="Show state labels (Idle/Listening/Processing) next to the animation?",
-            default=get_val("shell", "show_state_text", default=True),
-        ).execute()
-        show_transcript = inquirer.confirm(
-            message="Show live transcription on screen while processing?",
-            default=get_val("shell", "show_transcript", default=True),
-        ).execute()
         auto_submit = inquirer.confirm(
             message="Auto-submit the LLM's commands? (Warning: skips manual review)",
             default=get_val("shell", "auto_submit", default=False),
@@ -266,8 +264,6 @@ def interactive_setup(section: str = None) -> None:
     else:
         inner_shell = get_val("shell", "inner_shell", default=os.environ.get("SHELL") or "/bin/sh")
         voice_on_start = get_val("shell", "voice_on_start", default=False)
-        show_state_text = get_val("shell", "show_state_text", default=True)
-        show_transcript = get_val("shell", "show_transcript", default=True)
         auto_submit = get_val("shell", "auto_submit", default=False)
 
     # --- LLM / THINKER ---
@@ -521,8 +517,6 @@ def interactive_setup(section: str = None) -> None:
         "[shell]",
         f"inner_shell = {json.dumps(inner_shell)}",
         f"voice_on_start = {str(voice_on_start).lower()}",
-        f"show_state_text = {str(show_state_text).lower()}",
-        f"show_transcript = {str(show_transcript).lower()}",
         f"auto_submit = {str(auto_submit).lower()}",
         "",
         "[keybinds]",
@@ -667,12 +661,23 @@ def load_config() -> VshConfig:
     if "VSH_LLM_KEY" in os.environ:
         cfg.llm.api_key = os.environ["VSH_LLM_KEY"]
 
+    if "VSH_OUTPUT_MODE" in os.environ:
+        mode = os.environ["VSH_OUTPUT_MODE"].lower()
+        if mode in ("speak_and_command", "command_only", "speak_only"):
+            cfg.llm.output_mode = mode
+
     if "VSH_OVERLAY" in os.environ:
         val = os.environ["VSH_OVERLAY"].lower()
-        if val in ("none", "cursor", "statusline"):
+        if val in ("auto", "kitty", "none"):
             cfg.shell.overlay_mode = val
         elif val in ("0", "off", "false"):
             cfg.shell.overlay_mode = "none"
+
+    if "VSH_VOICE_HANDLER" in os.environ:
+        cfg.shell.voice_handler = os.environ["VSH_VOICE_HANDLER"]
+
+    if "VSH_RESPONSE_BRIDGE" in os.environ:
+        cfg.shell.response_bridge = os.environ["VSH_RESPONSE_BRIDGE"]
 
     config_path = _get_config_path()
     if not config_path.exists():

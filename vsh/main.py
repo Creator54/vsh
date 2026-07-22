@@ -10,9 +10,7 @@ from vsh.providers import resolve_stt, resolve_thinker, resolve_tts
 
 STATE = {"v": False, "in": None, "out": None, "vad_thr": 1000, "vad_sil": 15, "model": "vosk-model-en-in-0.5"}
 
-# --- SHELL PROXY INTERCEPT ---
-# If vsh is used as $SHELL, programs like nvim and tmux will execute `vsh -c "cmd"`.
-# Typer will crash on -c. We must intercept it at the module level before Typer boots.
+# Programs invoke $SHELL with `-c`, so handle it before Typer parses the arguments.
 if len(sys.argv) >= 3 and sys.argv[1] == "-c":
     try:
         from vsh.core.config import load_config
@@ -25,9 +23,7 @@ if len(sys.argv) >= 3 and sys.argv[1] == "-c":
     if "vsh" in inner:
         inner = "/bin/bash"
 
-    # Completely replace current process with the inner shell
     os.execv(inner, [inner, "-c"] + sys.argv[2:])
-# -----------------------------
 
 
 class NoSuchCommandShowsHelp(typer.core.TyperGroup):
@@ -74,7 +70,7 @@ def main(
     no_overlay: bool = typer.Option(
         False, "--no-overlay", help="Disable the voice HUD overlay entirely (pure passthrough)."
     ),
-    serve: bool = typer.Option(False, "--serve", help="Expose this live shell to kai over HTTP."),
+    serve: bool = typer.Option(False, "--serve", help="Expose this live shell over local HTTP."),
     port: int = typer.Option(8770, "--port", help="Port for --serve (default 8770)."),
 ):
     """Voice Shell — Default action is to start the interactive terminal wrapper."""
@@ -96,8 +92,14 @@ def main(
     if echo:
         config.llm.provider = "echo"
 
+    voice_handler = None
+    if config.shell.voice_handler:
+        from vsh.providers.cli import CliThinker
+
+        voice_handler = CliThinker(command=config.shell.voice_handler, timeout=300)
+
     thinker = None
-    if config.llm.provider:
+    if not voice_handler and config.llm.provider:
         try:
             thinker = resolve_thinker(config.llm.provider, config)
         except Exception as e:
@@ -111,69 +113,29 @@ def main(
         sys.stderr.write(f"[vsh] Failed to load TTS '{config.tts.provider}': {e}\n")
         logger.error(f"Failed to load TTS '{config.tts.provider}': {e}")
 
-    if config.tts.provider and not tts_provider:
+    if config.tts.provider not in ("", "none") and not tts_provider:
         logger.warning(f"Unknown or failed TTS provider: {config.tts.provider}")
 
-    pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
-
-    # KAI Integration: Auto-serve if running inside herdr
-    pane_id = os.environ.get("HERDR_PANE_ID")
-    sess_file = None
-    if pane_id:
-        import socket
-        import uuid
-        import json
-        import time
-        from pathlib import Path
-        
-        serve = True
-        if port == 8770:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-            s.close()
-            
-        sess_file = Path.home() / ".kai" / "vsh_sessions.json"
-        try:
-            sess_file.parent.mkdir(parents=True, exist_ok=True)
-            recs = {}
-            if sess_file.exists():
-                with open(sess_file, "r") as f:
-                    recs = json.load(f)
-            recs[pane_id] = {
-                "session_id": uuid.uuid4().hex[:12],
-                "pane_id": pane_id,
-                "label": "",
-                "cwd": os.environ.get("HERDR_ACTIVE_PANE_CWD", os.getcwd()),
-                "vsh_port": port,
-                "created": time.time(),
-            }
-            with open(sess_file, "w") as f:
-                json.dump(recs, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to register herdr session: {e}")
+    pty_shell = PtyShell(
+        config,
+        thinker,
+        verbose=STATE["v"],
+        tts_provider=tts_provider,
+        voice_handler=voice_handler,
+    )
 
     if serve:
-        from vsh.core.server import serve as serve_http
+        try:
+            from vsh.core.server import serve as serve_http
 
-        serve_http(pty_shell, port=port)
+            serve_http(pty_shell, port=port)
+        except Exception as e:
+            logger.error(f"Shell bridge failed: {e}")
 
     try:
         pty_shell.run()
     except Exception as e:
         logger.error(f"Shell crashed: {e}")
-    finally:
-        if pane_id and sess_file and sess_file.exists():
-            try:
-                import json
-                with open(sess_file, "r") as f:
-                    recs = json.load(f)
-                if pane_id in recs:
-                    del recs[pane_id]
-                    with open(sess_file, "w") as f:
-                        json.dump(recs, f, indent=2)
-            except Exception:
-                pass
 
 
 @app.command()
