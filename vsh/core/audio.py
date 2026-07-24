@@ -47,7 +47,7 @@ def detect_phrase(
     activity_callback=None,
     noise_energies=None,
 ) -> PhraseCapture:
-    """Return one WebRTC-confirmed phrase from arbitrary PCM chunk sizes."""
+    """Return one detected phrase from raw audio chunks."""
     if vad is None:
         import webrtcvad
 
@@ -179,7 +179,7 @@ def detect_phrase(
 
 @contextlib.contextmanager
 def no_stderr():
-    """Aggressively redirect stderr at the OS level to silence low-level library noise."""
+    """Silence low-level audio library warnings."""
     fd = sys.stderr.fileno()
     with os.fdopen(os.dup(fd), "w") as saved:
         with open(os.devnull, "w") as devnull:

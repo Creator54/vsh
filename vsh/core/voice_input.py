@@ -24,7 +24,7 @@ class VoiceState(StrEnum):
 
 
 def _is_silence_hallucination(text: str) -> bool:
-    """Recognize stock Whisper captions commonly produced from non-speech."""
+    """Recognize filler captions commonly produced from non-speech."""
     normalized = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
     return normalized in _SILENCE_HALLUCINATIONS
 
@@ -46,7 +46,7 @@ class VoiceInputThread(threading.Thread):
         state_callback=None,
     ):
         super().__init__(name="VoiceInputThread")
-        self.daemon = False  # Ensure cleanup on exit
+        self.daemon = False
         self.stt_queue = stt_queue
         self.config = config
         self.device_index = device_index
@@ -63,21 +63,20 @@ class VoiceInputThread(threading.Thread):
         self.is_processing = False
         self.system_mic_muted = None
 
-        # Events to coordinate toggling without busy loops
         self._toggle_event = threading.Event()
         self._suppress_until = 0.0
         self._processing_lock = threading.Lock()
         self._active_stream = None
 
     def suppress_input(self, duration: float = 0.6):
-        """Discard microphone frames caused by a known terminal keypress."""
+        """Ignore brief audio caused by a known keypress."""
         self._suppress_until = max(self._suppress_until, time.monotonic() + duration)
 
     def _input_suppressed(self) -> bool:
         return time.monotonic() < self._suppress_until
 
     def load_model(self):
-        """Lazy load the STT model on first use."""
+        """Load the speech model on first use."""
         if not self.model_loaded:
             provider_name = self.config.stt.provider if self.config else "vosk"
             logger.info(f"Loading STT model ({provider_name})...")
@@ -216,6 +215,6 @@ class VoiceInputThread(threading.Thread):
             except Exception as e:
                 self._finish_processing()
                 logger.error(f"Voice thread error: {e}")
-                time.sleep(1)  # Prevent rapid crash loops
+                time.sleep(1)  # Avoid a tight retry loop after device failures.
 
         logger.debug("Voice input thread exiting cleanly.")

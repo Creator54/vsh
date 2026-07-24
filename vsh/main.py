@@ -4,17 +4,22 @@ import sys
 import typer
 from loguru import logger
 
-from vsh.core.config import _get_config_path, interactive_setup, load_config
+from vsh.core.config import _get_config_path, load_config
 from vsh.core.pty_shell import PtyShell
+from vsh.core.setup import (
+    capture_keybind,
+    interactive_setup,
+    update_keybind_config,
+    update_shell_rc_bind,
+)
 from vsh.providers import resolve_stt, resolve_thinker, resolve_tts
 
-STATE = {"v": False, "in": None, "out": None, "vad_thr": 1000, "vad_sil": 15, "model": "vosk-model-en-in-0.5"}
+DEFAULT_VOSK_MODEL = "vosk-model-en-in-0.5"
+VERBOSE = False
 
 # Programs invoke $SHELL with `-c`, so handle it before Typer parses the arguments.
 if len(sys.argv) >= 3 and sys.argv[1] == "-c":
     try:
-        from vsh.core.config import load_config
-
         cfg = load_config()
         inner = cfg.shell.inner_shell or os.environ.get("SHELL") or "/bin/bash"
     except Exception:
@@ -32,8 +37,6 @@ class NoSuchCommandShowsHelp(typer.core.TyperGroup):
     def get_command(self, ctx, cmd_name):
         command = super().get_command(ctx, cmd_name)
         if command is None:
-            import sys
-
             sys.stderr.write(f"Unknown command: '{cmd_name}'\n")
             sys.stderr.write("\n" + ctx.get_help() + "\n")
             sys.exit(0)
@@ -41,7 +44,8 @@ class NoSuchCommandShowsHelp(typer.core.TyperGroup):
 
 
 def setup_logger(v: bool):
-    STATE["v"] = v
+    global VERBOSE
+    VERBOSE = v
     logger.remove()
     logger.add(sys.stderr, level="INFO" if v else "ERROR", format="{message}")
     try:
@@ -64,16 +68,16 @@ app = typer.Typer(
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    voice: bool = typer.Option(False, "--voice", help="Start shell with microphone hot."),
+    voice: bool = typer.Option(False, "--voice", help="Start listening for voice commands immediately."),
     v: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logs."),
-    echo: bool = typer.Option(False, "--echo", help="Run in diagnostic echo mode without LLMs."),
+    echo: bool = typer.Option(False, "--echo", help="Echo recognized speech without using an AI."),
     no_overlay: bool = typer.Option(
-        False, "--no-overlay", help="Disable the voice HUD overlay entirely (pure passthrough)."
+        False, "--no-overlay", help="Hide the voice indicator and use the normal terminal cursor."
     ),
-    serve: bool = typer.Option(False, "--serve", help="Expose this live shell over local HTTP."),
+    serve: bool = typer.Option(False, "--serve", help="Expose this live shell on a local-only web server."),
     port: int = typer.Option(8770, "--port", help="Port for --serve (default 8770)."),
 ):
-    """Voice Shell — Default action is to start the interactive terminal wrapper."""
+    """Start an interactive terminal controlled by voice."""
     setup_logger(v)
     if os.environ.get("VSH_ACTIVE"):
         sys.stderr.write("[vsh] Already running inside vsh. Exiting.\n")
@@ -103,8 +107,8 @@ def main(
         try:
             thinker = resolve_thinker(config.llm.provider, config)
         except Exception as e:
-            sys.stderr.write(f"[vsh] Failed to load thinker '{config.llm.provider}': {e}\n")
-            logger.error(f"Failed to load thinker '{config.llm.provider}': {e}")
+            sys.stderr.write(f"[vsh] Failed to load AI provider '{config.llm.provider}': {e}\n")
+            logger.error(f"Failed to load AI provider '{config.llm.provider}': {e}")
 
     tts_provider = None
     try:
@@ -119,7 +123,7 @@ def main(
     pty_shell = PtyShell(
         config,
         thinker,
-        verbose=STATE["v"],
+        verbose=VERBOSE,
         tts_provider=tts_provider,
         voice_handler=voice_handler,
     )
@@ -142,17 +146,14 @@ def main(
 def stt(
     file: str = typer.Option(None, "--file", "-f", help="Read from audio file instead of mic"),
 ):
-    """Speech-to-Text: Convert mic/WAV to text."""
+    """Convert microphone input or an audio file to text."""
     config = load_config()
-    STATE["in"] = config.stt.device_index
-    STATE["vad_thr"] = config.stt.vad_threshold
-    STATE["vad_sil"] = config.stt.vad_silence_limit
 
     stt_provider = resolve_stt(config)
     if not stt_provider:
         from vsh.providers.vosk import VoskSTTProvider
 
-        stt_provider = VoskSTTProvider(config.stt.model or STATE["model"])
+        stt_provider = VoskSTTProvider(config.stt.model or DEFAULT_VOSK_MODEL)
     if file == "-":
         res = stt_provider.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
     elif file:
@@ -163,16 +164,16 @@ def stt(
             rate = f.getframerate()
         res = stt_provider.transcribe_stream([data], rate=rate)
     else:
-        if STATE["v"]:
+        if VERBOSE:
             sys.stderr.write("LISTENING\n")
             sys.stderr.flush()
         from vsh.core.audio import MicStream, no_stderr
 
-        with no_stderr(), MicStream(device_index=STATE["in"]) as s:
+        with no_stderr(), MicStream(device_index=config.stt.device_index) as s:
             capture = s.capture_phrase(
-                threshold=STATE["vad_thr"],
-                silence_limit=STATE["vad_sil"],
-                verbose=STATE["v"],
+                threshold=config.stt.vad_threshold,
+                silence_limit=config.stt.vad_silence_limit,
+                verbose=VERBOSE,
             )
             res = stt_provider.transcribe_stream(iter(capture.chunks)) if capture.accepted else ""
     if res:
@@ -183,11 +184,10 @@ def stt(
 def tts(
     text: str = typer.Argument(None),
     save: str = typer.Option(None, "--save", help="Save to WAV file"),
-    stream: bool = typer.Option(False, "--stream", help="Output raw bytes to stdout"),
+    stream: bool = typer.Option(False, "--stream", help="Write raw audio to standard output"),
 ):
-    """Text-to-Speech: Read text aloud."""
+    """Read text aloud."""
     config = load_config()
-    STATE["out"] = config.tts.device_index
     text = text or (not sys.stdin.isatty() and sys.stdin.read().strip())
     if not text:
         logger.error("No input")
@@ -198,12 +198,11 @@ def tts(
     with no_stderr():
         tts_provider = resolve_tts(config)
         if not tts_provider:
-            # Fallback to a default if None
             from vsh.providers.supertonic import SupertonicTTSProvider
 
             tts_provider = SupertonicTTSProvider(voice="F1")
 
-    if STATE["v"]:
+    if VERBOSE:
         sys.stderr.write("SPEAKING\n")
         sys.stderr.flush()
     wav = tts_provider.synthesize(text)
@@ -213,12 +212,11 @@ def tts(
     if save:
         save_audio(save, data, 44100)
         logger.info(f"Saved: {save}")
+    elif stream:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
     else:
-        if stream:
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-        else:
-            play_audio(data, 44100, device_index=STATE["out"])
+        play_audio(data, 44100, device_index=config.tts.device_index)
 
 
 @app.command()
@@ -229,7 +227,7 @@ def setup(section: str = typer.Argument(None, help="Specific section to configur
 
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def wrap(ctx: typer.Context):
-    """Wrap a specific command/LLM inside vsh (e.g. vsh wrap aichat)."""
+    """Run a command or AI assistant inside vsh (for example, vsh wrap aichat)."""
     if not ctx.args:
         logger.error("No command provided. Usage: vsh wrap <command>")
         raise typer.Exit(code=1)
@@ -237,16 +235,10 @@ def wrap(ctx: typer.Context):
     config = load_config()
     import shlex
 
-    # Execute the command inside the user's default shell
     config.shell.inner_shell = os.environ.get("SHELL") or "/bin/bash"
     config.shell.inner_shell_args = [config.shell.inner_shell, "-c", shlex.join(ctx.args)]
 
-    # We disable the internal LLM when wrapping an external one to avoid double-processing
-    thinker = None
-    # We also disable TTS since direct injection mode doesn't synthesize speech
-    tts_provider = None
-
-    pty_shell = PtyShell(config, thinker, verbose=STATE["v"], tts_provider=tts_provider)
+    pty_shell = PtyShell(config, verbose=VERBOSE)
     try:
         pty_shell.run()
     except Exception as e:
@@ -255,11 +247,7 @@ def wrap(ctx: typer.Context):
 
 @app.command()
 def bind():
-    """Interactively setup a new keybind and update shell config."""
-    import json
-
-    from vsh.core.config import capture_keybind, update_shell_rc_bind
-
+    """Interactively set up a new keybind and update shell config."""
     sys.stdout.write("Keybind Setup Wizard\n")
 
     keybind_data = None
@@ -283,69 +271,7 @@ def bind():
         return
 
     try:
-        # Round-trip through tomllib so the edit is robust against different spacing,
-        # comments, and table ordering. We only regenerate the [keybinds] table; the
-        # rest of the file is preserved verbatim.
-        try:
-            import tomllib
-        except ImportError:
-            import tomli as tomllib
-
-        with open(config_path, "rb") as f:
-            data = tomllib.load(f)
-
-        kb = dict(data.get("keybinds", {}))
-        kb["toggle_listen"] = keybind_data["name"]
-        kb["toggle_listen_triggers"] = keybind_data["triggers"]
-        data["keybinds"] = kb
-
-        def _dump_value(v):
-            if isinstance(v, bool):
-                return "true" if v else "false"
-            if isinstance(v, list | tuple):
-                return "[" + ", ".join(_dump_value(x) for x in v) + "]"
-            return json.dumps(v)
-
-        lines = config_path.read_text().splitlines()
-        out = []
-        i = 0
-        n = len(lines)
-        in_keybinds = False
-        kb_replaced = False
-        while i < n:
-            line = lines[i]
-            stripped = line.strip()
-            if stripped == "[keybinds]":
-                # Emit the regenerated keybinds table and skip until the next section
-                out.append("[keybinds]")
-                for k, v in kb.items():
-                    out.append(f"{k} = {_dump_value(v)}")
-                kb_replaced = True
-                in_keybinds = True
-                i += 1
-                continue
-            if in_keybinds:
-                # Stop skipping once we hit the next table header
-                if stripped.startswith("[") and stripped.endswith("]"):
-                    in_keybinds = False
-                    out.append(line)
-                    i += 1
-                    continue
-                else:
-                    i += 1
-                    continue
-            out.append(line)
-            i += 1
-
-        # If no [keybinds] section existed, append one
-        if not kb_replaced:
-            if out and out[-1].strip():
-                out.append("")
-            out.append("[keybinds]")
-            for k, v in kb.items():
-                out.append(f"{k} = {_dump_value(v)}")
-
-        config_path.write_text("\n".join(out) + "\n")
+        update_keybind_config(config_path, keybind_data)
         sys.stdout.write("Updated config.toml with new keybind.\n")
 
     except Exception as e:
@@ -370,7 +296,7 @@ def bind():
             default_rc = "~/.bashrc"
 
         rc_file = inquirer.text(message="Shell config file:", default=default_rc).execute()
-        update_shell_rc_bind(rc_file, keybind_data)
+        update_shell_rc_bind(rc_file, keybind_data, False)
 
 
 if __name__ == "__main__":

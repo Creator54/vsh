@@ -34,13 +34,7 @@ def resolve_tts(config: VshConfig):
 
 
 def resolve_thinker(name: str, config: VshConfig):
-    """Resolve a thinker by name with three-tier fallback.
-
-    1. Built-in registry (echo, ollama)
-    2. Config profiles ([llm.<name>])
-    3. Raw CLI command fallback
-    """
-    # 1. Built-in registry
+    """Find a built-in, configured, or command-line AI provider."""
     if name == "echo":
         from vsh.providers.cli import CliThinker
 
@@ -52,7 +46,6 @@ def resolve_thinker(name: str, config: VshConfig):
             endpoint="http://localhost:11434/api/generate", format="ollama", model=config.llm.model or "llama3"
         )
 
-    # 2. Config profiles
     if name in config.custom_thinkers:
         profile = config.custom_thinkers[name]
         thinker_type = profile.get("type", "cli")
@@ -66,7 +59,6 @@ def resolve_thinker(name: str, config: VshConfig):
             return CliThinker(**profile)
         raise ValueError(f"Unknown thinker type '{thinker_type}' for profile '{name}'")
 
-    # 3. Fallback: raw CLI command
     from vsh.providers.cli import CliThinker
 
     return CliThinker(command=name)

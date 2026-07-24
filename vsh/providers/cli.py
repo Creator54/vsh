@@ -3,7 +3,7 @@ import subprocess
 
 
 class CliThinker:
-    """Subprocess-based thinker that runs any CLI command with the prompt as stdin."""
+    """Run a command-line tool with the prompt as input."""
 
     def __init__(self, command: str, timeout: float = 15, **kwargs):
         self.command = command
@@ -16,7 +16,6 @@ class CliThinker:
             cmd = self.command
             stdin_input = prompt
 
-            # Support {} templating for tools that take prompt as argument
             if "{}" in cmd:
                 cmd = cmd.replace("{}", shlex.quote(prompt))
                 stdin_input = None

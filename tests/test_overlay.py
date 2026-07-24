@@ -10,7 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import vsh.core.pty_shell as pty_module
 from vsh.core.config import VshConfig, load_config
-from vsh.core.pty_shell import CURSOR_RESET, PtyShell
+from vsh.core.pty_shell import PtyShell
+from vsh.core.voice_indicator import CURSOR_RESET
 from vsh.core.voice_input import VoiceState
 
 
@@ -47,7 +48,7 @@ class OverlayTests(unittest.TestCase):
         ):
             shell = PtyShell(cfg, thinker=None, verbose=False, tts_provider=None)
         shell.master_fd = 7
-        shell.rows, shell.cols = 24, 80
+        shell.indicator.resize(80)
         shell._current_cursor_state = VoiceState.IDLE
         shell.voice_thread.is_listening = True
         return shell
@@ -62,14 +63,14 @@ class OverlayTests(unittest.TestCase):
     def test_invalid_mode_falls_back_to_auto(self):
         shell = self._make_shell("statusline")
         shell.old_tty_attrs = object()
-        with patch.object(shell, "_probe_graphics_support", return_value=False):
-            shell._select_visual_mode()
-        self.assertEqual(shell._visual_mode, "cursor")
+        with patch.object(shell.indicator, "_probe_graphics_support", return_value=False):
+            shell.indicator.select_mode(True)
+        self.assertEqual(shell.indicator.mode, "cursor")
 
     def test_probe_accepts_graphics_response_before_device_attributes(self):
         shell = self._make_shell("auto")
         shell.old_tty_attrs = object()
-        response = f"\x1b_Gi={shell._image_id};OK\x1b\\\x1b[?1;2cuser".encode()
+        response = f"\x1b_Gi={shell.indicator._image_id};OK\x1b\\\x1b[?1;2cuser".encode()
         with (
             patch("sys.stdout") as stdout,
             patch("sys.stdin.fileno", return_value=0),
@@ -77,8 +78,8 @@ class OverlayTests(unittest.TestCase):
             patch("os.read", return_value=response),
         ):
             stdout.buffer = MagicMock()
-            self.assertTrue(shell._probe_graphics_support(timeout=0.25))
-        self.assertEqual(shell._pending_input, b"user")
+            self.assertTrue(shell.indicator._probe_graphics_support(timeout=0.25))
+        self.assertEqual(shell.indicator.pending_input, b"user")
 
     def test_probe_rejects_device_attributes_without_graphics(self):
         shell = self._make_shell("auto")
@@ -90,7 +91,7 @@ class OverlayTests(unittest.TestCase):
             patch("os.read", return_value=b"\x1b[?1;2c"),
         ):
             stdout.buffer = MagicMock()
-            self.assertFalse(shell._probe_graphics_support(timeout=0.25))
+            self.assertFalse(shell.indicator._probe_graphics_support(timeout=0.25))
 
     def test_graphics_mode_keeps_full_terminal_height(self):
         captured = {}
@@ -107,11 +108,11 @@ class OverlayTests(unittest.TestCase):
 
     def test_graphics_badge_is_compact_and_text_safe(self):
         shell = self._make_shell("kitty")
-        shell._visual_mode = "graphics"
+        shell.indicator.mode = "graphics"
         buf = MagicMock()
         with patch("sys.stdout") as stdout:
             stdout.buffer = buf
-            shell._render_graphics_badge()
+            shell.indicator.render(shell._effective_cursor_state())
         written = buf.write.call_args[0][0]
         self.assertIn(b"a=t", written)
         self.assertIn(b"a=p", written)
@@ -125,35 +126,35 @@ class OverlayTests(unittest.TestCase):
 
     def test_inactive_vsh_removes_the_graphics_badge(self):
         shell = self._make_shell("kitty")
-        shell._visual_mode = "graphics"
-        shell._graphics_visible = True
+        shell.indicator.mode = "graphics"
+        shell.indicator._graphics_visible = True
         buf = MagicMock()
 
         with patch("sys.stdout") as stdout:
             stdout.buffer = buf
             shell.voice_thread.is_listening = False
             shell._current_cursor_state = None
-            shell._render_graphics_badge()
+            shell.indicator.render(shell._effective_cursor_state())
 
         written = b"".join(call.args[0] for call in buf.write.call_args_list)
         self.assertIn(b"a=d,d=I", written)
         self.assertNotIn(b"a=t", written)
         self.assertNotIn(b"a=p", written)
         self.assertIn(b"\033[?25h", written)
-        self.assertFalse(shell._graphics_visible)
+        self.assertFalse(shell.indicator._graphics_visible)
 
     def test_graphics_redraw_deletes_the_previous_frame_first(self):
         shell = self._make_shell("kitty")
-        shell._visual_mode = "graphics"
+        shell.indicator.mode = "graphics"
         buf = MagicMock()
 
         with patch("sys.stdout") as stdout:
             stdout.buffer = buf
             shell._set_system_mic_muted(True)
-            shell._render_graphics_badge()
+            shell.indicator.render(shell._effective_cursor_state())
             buf.reset_mock()
             shell._set_system_mic_muted(False)
-            shell._render_graphics_badge()
+            shell.indicator.render(shell._effective_cursor_state())
 
         written = b"".join(call.args[0] for call in buf.write.call_args_list)
         self.assertIn(b"a=d,d=I", written)
@@ -161,8 +162,8 @@ class OverlayTests(unittest.TestCase):
 
     def test_typing_restores_native_cursor_and_delays_image(self):
         shell = self._make_shell("kitty")
-        shell._visual_mode = "graphics"
-        shell._graphics_visible = True
+        shell.indicator.mode = "graphics"
+        shell.indicator._graphics_visible = True
         buf = MagicMock()
         with patch("sys.stdout") as stdout, patch("time.monotonic", return_value=10.0):
             stdout.buffer = buf
@@ -170,7 +171,7 @@ class OverlayTests(unittest.TestCase):
         written = b"".join(call.args[0] for call in buf.write.call_args_list)
         self.assertIn(b"a=d,d=I", written)
         self.assertIn(b"\033[?25h", written)
-        self.assertGreater(shell._typing_until, 10.0)
+        self.assertGreater(shell.indicator._typing_until, 10.0)
         self.assertEqual(shell._current_cursor_state, VoiceState.IDLE)
 
     def test_typing_temporarily_suppresses_microphone_input(self):
@@ -184,17 +185,17 @@ class OverlayTests(unittest.TestCase):
 
     def test_graphics_cursor_suppressed_in_alternate_screen(self):
         shell = self._make_shell("kitty")
-        shell._visual_mode = "graphics"
-        shell._alternate_screen = True
+        shell.indicator.mode = "graphics"
+        shell.indicator._alternate_screen = True
         buf = MagicMock()
         with patch("sys.stdout") as stdout:
             stdout.buffer = buf
-            shell._render_graphics_badge()
+            shell.indicator.render(shell._effective_cursor_state())
         buf.write.assert_not_called()
 
     def test_cursor_fallback_writes_only_cursor_controls(self):
         shell = self._make_shell("auto")
-        shell._visual_mode = "cursor"
+        shell.indicator.mode = "cursor"
         buf = MagicMock()
         with patch("sys.stdout") as stdout:
             stdout.buffer = buf
@@ -211,7 +212,7 @@ class OverlayTests(unittest.TestCase):
         shell._volume_callback(9000, 1000)
 
         self.assertEqual(shell._current_cursor_state, VoiceState.IDLE)
-        self.assertEqual(shell._last_energy, 9000)
+        self.assertEqual(shell.indicator.energy, 9000)
 
     def test_system_mic_state_is_independent_from_vsh_activation(self):
         shell = self._make_shell("none")
@@ -241,7 +242,7 @@ class OverlayTests(unittest.TestCase):
 
         self.assertEqual(shell._effective_cursor_state(), VoiceState.MUTED)
 
-    def test_voice_status_uses_the_same_effective_state_as_the_hud(self):
+    def test_voice_status_uses_the_same_effective_state_as_the_indicator(self):
         shell = self._make_shell("none")
         shell._set_system_mic_muted(True)
 
@@ -344,7 +345,7 @@ class OverlayTests(unittest.TestCase):
         prompt = shell.thinker.ask.call_args.args[0]
         self.assertIn('"speech":"brief response"', prompt)
         self.assertIn('"command":null', prompt)
-        self.assertIn("Fish command string or null", prompt)
+        self.assertIn("shell command string or null", prompt)
         self.assertIn("User request: tell me the current directory", prompt)
 
     def test_speaker_off_publishes_speech_then_command_in_one_bridge_event(self):
@@ -472,11 +473,11 @@ class OverlayTests(unittest.TestCase):
 
     def test_graphics_cleanup_is_targeted(self):
         shell = self._make_shell("kitty")
-        shell._graphics_visible = True
+        shell.indicator._graphics_visible = True
         buf = MagicMock()
         with patch("sys.stdout") as stdout:
             stdout.buffer = buf
-            shell._delete_graphics_badge()
+            shell.indicator._delete_graphics()
         written = buf.write.call_args[0][0]
         self.assertIn(b"a=d,d=I", written)
         self.assertNotIn(b"a=d,d=a", written)
@@ -484,14 +485,14 @@ class OverlayTests(unittest.TestCase):
     def test_none_mode_is_visual_noop(self):
         shell = self._make_shell("none")
         shell.old_tty_attrs = object()
-        shell._select_visual_mode()
-        self.assertEqual(shell._visual_mode, "none")
+        shell.indicator.select_mode(True)
+        self.assertEqual(shell.indicator.mode, "none")
         self.assertEqual(CURSOR_RESET, b"\033]112\a\033[0 q")
 
     def test_terminal_restore_tolerates_a_closed_tmux_pane(self):
         shell = self._make_shell("auto")
         shell.old_tty_attrs = object()
-        shell._visual_mode = "cursor"
+        shell.indicator.mode = "cursor"
 
         with (
             patch("sys.stdout") as stdout,

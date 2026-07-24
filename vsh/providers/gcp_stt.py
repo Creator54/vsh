@@ -22,7 +22,6 @@ class GcpSTTProvider:
         self.language_code = language_code
 
     def transcribe_stream(self, audio_stream: Iterator[bytes], on_phrase=None, rate: int = 16000) -> str:
-        # GCP requires a generator that yields StreamingRecognizeRequest objects
         def request_generator():
             for chunk in audio_stream:
                 yield self.speech.StreamingRecognizeRequest(audio_content=chunk)
@@ -31,8 +30,6 @@ class GcpSTTProvider:
             encoding=self.speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=rate,
             language_code=self.language_code,
-            # Enable interim results to show live partial text like Vosk does
-            # Though vsh's current interface expects mostly full phrases or handles partials in the loop
         )
 
         streaming_config = self.speech.StreamingRecognitionConfig(config=config, interim_results=True)
@@ -63,20 +60,17 @@ class GcpSTTProvider:
                     final_transcripts.append(transcript.strip())
                     if on_phrase:
                         on_phrase(transcript.strip())
-                    # Clear partial output line
                     sys.stderr.write("\r\033[K")
                     sys.stderr.flush()
                 else:
-                    # Print partial transcript to stderr
                     sys.stderr.write(f"\r\033[K• {transcript.strip()}")
                     sys.stderr.flush()
 
         except Exception as e:
             logger.error(f"Error during GCP STT streaming: {e}")
-            sys.stderr.write("\r\033[K")  # Clear partials on error
+            sys.stderr.write("\r\033[K")
             sys.stderr.flush()
 
-        # Clean up any remaining partials
         sys.stderr.write("\r\033[K")
         sys.stderr.flush()
 

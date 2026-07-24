@@ -1,16 +1,16 @@
 import base64
-import io
 import logging
-import wave
 
 import numpy as np
 import requests
+
+from vsh.providers.audio_format import decode_pcm16_wav, encode_pcm_wav, resample
 
 logger = logging.getLogger(__name__)
 
 
 class SarvamSTTProvider:
-    """Sarvam AI STT Provider (Translates Indian languages to English)."""
+    """Translate spoken Indian languages to English with Sarvam AI."""
 
     def __init__(self, config):
         self.config = config
@@ -21,20 +21,10 @@ class SarvamSTTProvider:
         self.endpoint = "https://api.sarvam.ai/speech-to-text-translate"
 
     def transcribe_stream(self, audio_stream, on_phrase=None) -> str:
-        with io.BytesIO() as wav_io:
-            with wave.open(wav_io, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(16000)
-                for chunk in audio_stream:
-                    wf.writeframes(chunk)
-            wav_data = wav_io.getvalue()
+        wav_data = encode_pcm_wav(b"".join(audio_stream), 16000)
 
-        # Sarvam requires api-subscription-key
         headers = {"api-subscription-key": self.api_key}
         files = {"file": ("audio.wav", wav_data, "audio/wav")}
-
-        # Required parameter for speech-to-text-translate
         data = {"prompt": "Terminal command voice input."}
 
         try:
@@ -42,7 +32,6 @@ class SarvamSTTProvider:
             response.raise_for_status()
             resp_json = response.json()
 
-            # Sarvam might return {"transcript": "text"} or {"text": "text"}
             text = resp_json.get("transcript") or resp_json.get("text", "")
             if text and on_phrase:
                 on_phrase(text)
@@ -55,7 +44,7 @@ class SarvamSTTProvider:
 
 
 class SarvamTTSProvider:
-    """Sarvam AI TTS Provider."""
+    """Generate speech with Sarvam AI."""
 
     def __init__(self, config):
         self.config = config
@@ -86,23 +75,7 @@ class SarvamTTSProvider:
                 raise ValueError("No audio returned from Sarvam")
 
             audio_bytes = base64.b64decode(audios[0])
-
-            with io.BytesIO(audio_bytes) as wav_io:
-                with wave.open(wav_io, "rb") as wf:
-                    frames = wf.readframes(wf.getnframes())
-                    audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-
-                    # Upsample 16000Hz to 44100Hz for vsh playback
-                    original_rate = 16000
-                    target_rate = 44100
-                    duration = len(audio_data) / original_rate
-                    target_length = int(duration * target_rate)
-
-                    x_old = np.linspace(0, duration, len(audio_data))
-                    x_new = np.linspace(0, duration, target_length)
-                    resampled_audio = np.interp(x_new, x_old, audio_data).astype(np.float32)
-
-                    return resampled_audio
+            return resample(decode_pcm16_wav(audio_bytes), 16000, 44100)
 
         except Exception as e:
             logger.error(f"Sarvam TTS failed: {e}")

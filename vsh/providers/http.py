@@ -7,7 +7,7 @@ import urllib.request
 
 
 class HttpThinker:
-    """HTTP API-based thinker supporting OpenAI-compatible, Ollama, Anthropic, and Gemini formats."""
+    """Send prompts to OpenAI, Ollama, Anthropic, or Gemini-compatible servers."""
 
     FORMATS = {
         "openai": {

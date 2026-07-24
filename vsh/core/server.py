@@ -1,7 +1,6 @@
-"""Expose a live PtyShell over loopback HTTP.
+"""Expose a live shell on a local-only web server.
 
-Endpoints: /health, /tools (schema), /io/output (scrollback),
-/execute_tool (run a command via PtyShell.exec_command).
+Endpoints: /health, /tools, /io/output, /execute_tool.
 """
 
 import json
@@ -24,9 +23,8 @@ def _tools_schema(shell):
         {
             "name": "vsh_run_command",
             "description": (
-                f"Run a shell command in the user's live {shell.shell_name} session "
-                "(pid {}) and return its output + exit code. Fails if the shell is "
-                "busy.".format(shell.shell_pid)
+                f"Run a command in the user's live {shell.shell_name} session and return its output and exit code. "
+                "Fails if the shell is busy."
             ),
             "keywords": ["vsh", "shell", "run", "command", "live"],
             "params": {"command": {"type": "str", "required": True}},
@@ -53,11 +51,10 @@ def make_handler(shell):
             elif self.path.rstrip("/") == "/tools":
                 self._send(200, {"instance_id": f"vsh:{shell.shell_name}", "tools": _tools_schema(shell)})
             elif self.path.rstrip("/") == "/io/output":
-                from vsh.core.pty_shell import _strip_ansi, _strip_unicode
+                from vsh.core.pty_shell import _clean_output
 
                 raw = b"".join(shell.output_history)
-                clean = _strip_unicode(_strip_ansi(raw).decode("utf-8", "replace"))
-                self._send(200, {"output": clean})
+                self._send(200, {"output": _clean_output(raw)})
             else:
                 self._send(404, {"error": "not found"})
 

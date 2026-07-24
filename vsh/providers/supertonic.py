@@ -4,7 +4,7 @@ import numpy as np
 
 
 class SupertonicTTSProvider:
-    """Real Supertonic Text-to-Speech provider."""
+    """Supertonic text-to-speech provider."""
 
     def __init__(self, voice="F1"):
         self.voice = voice
@@ -12,11 +12,9 @@ class SupertonicTTSProvider:
         self.voice_style = None
         self._lock = threading.Lock()
 
-        # Load model in background
         threading.Thread(target=self._bg_load, daemon=True).start()
 
     def _bg_load(self):
-        # We import TTS here so the import itself doesn't block
         from supertonic import TTS
 
         with self._lock:
@@ -25,13 +23,11 @@ class SupertonicTTSProvider:
             self.engine = engine
 
     def synthesize(self, text: str) -> np.ndarray:
-        # Block until engine is loaded
         with self._lock:
             engine = self.engine
             voice_style = self.voice_style
 
         if not engine:
-            # Fallback if background load failed (though it shouldn't unless error)
             from supertonic import TTS
 
             engine = TTS(auto_download=True)
