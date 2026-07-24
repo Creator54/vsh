@@ -4,12 +4,177 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 import contextlib  # noqa: E402
 import os  # noqa: E402
 import queue  # noqa: E402
+import statistics  # noqa: E402
 import sys  # noqa: E402
+import threading  # noqa: E402
 import wave  # noqa: E402
+from collections import deque  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pyaudio  # noqa: E402
 from loguru import logger  # noqa: E402
+
+_VOICE_BAND_MIN_RATIO = 0.20
+_VOICE_BAND_SMOOTH_FRAMES = 5
+
+
+@dataclass(frozen=True)
+class PhraseCapture:
+    chunks: tuple[bytes, ...] = ()
+    voiced_ms: int = 0
+    reason: str = "silence"
+    accepted: bool = False
+
+
+def detect_phrase(
+    chunks,
+    *,
+    rate: int = 16000,
+    threshold: int = 1000,
+    silence_limit: int = 15,
+    idle_timeout_ms: int = 3200,
+    max_phrase_ms: int = 30000,
+    frame_ms: int = 20,
+    pre_roll_ms: int = 200,
+    min_speech_ms: int = 260,
+    calibration_ms: int = 500,
+    noise_multiplier: float = 1.8,
+    vad=None,
+    stop_check=None,
+    ignore_check=None,
+    volume_callback=None,
+    activity_callback=None,
+    noise_energies=None,
+) -> PhraseCapture:
+    """Return one WebRTC-confirmed phrase from arbitrary PCM chunk sizes."""
+    if vad is None:
+        import webrtcvad
+
+        vad = webrtcvad.Vad(3)
+
+    frame_bytes = rate * frame_ms // 1000 * 2
+    frame_samples = frame_bytes // 2
+    spectral_window = np.hanning(frame_samples)
+    frequencies = np.fft.rfftfreq(frame_samples, 1 / rate)
+    audible_band = (frequencies >= 80) & (frequencies <= 4000)
+    voice_band = (frequencies >= 300) & (frequencies <= 3400)
+    pre_roll = deque(maxlen=max(1, pre_roll_ms // frame_ms))
+    trigger_window = deque(maxlen=8)
+    voice_band_window = deque(maxlen=_VOICE_BAND_SMOOTH_FRAMES)
+    if noise_energies is None:
+        noise_energies = deque(maxlen=50)
+    captured = []
+    carry = b""
+    triggered = False
+    activity_announced = False
+    voiced_frames = 0
+    idle_frames = 0
+    trailing_unvoiced = 0
+    previous_sample = 0.0
+    max_frames = max_phrase_ms // frame_ms
+    idle_limit = idle_timeout_ms // frame_ms
+    calibration_frames = calibration_ms // frame_ms
+    minimum_threshold = max(100, threshold // 5)
+
+    def finish(reason: str) -> PhraseCapture:
+        accepted = triggered and voiced_frames * frame_ms >= min_speech_ms and reason != "cancelled"
+        if activity_announced and activity_callback:
+            activity_callback(False)
+        return PhraseCapture(
+            chunks=tuple(captured) if accepted else (),
+            voiced_ms=voiced_frames * frame_ms if accepted else 0,
+            reason=reason,
+            accepted=accepted,
+        )
+
+    for chunk in chunks:
+        if stop_check and stop_check():
+            return finish("cancelled")
+        carry += chunk
+        while len(carry) >= frame_bytes:
+            if stop_check and stop_check():
+                return finish("cancelled")
+            frame, carry = carry[:frame_bytes], carry[frame_bytes:]
+            if ignore_check and ignore_check():
+                if activity_announced and activity_callback:
+                    activity_callback(False)
+                pre_roll.clear()
+                trigger_window.clear()
+                voice_band_window.clear()
+                captured.clear()
+                triggered = False
+                activity_announced = False
+                voiced_frames = 0
+                idle_frames = 0
+                trailing_unvoiced = 0
+                previous_sample = 0.0
+                continue
+            samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32)
+            raw_energy = int(np.sqrt(np.mean(np.square(samples)))) if len(samples) else 0
+            # Pre-emphasis keeps low-frequency fan noise from masking speech onsets.
+            filtered = np.empty_like(samples)
+            filtered[0] = samples[0] - 0.97 * previous_sample
+            filtered[1:] = samples[1:] - 0.97 * samples[:-1]
+            previous_sample = samples[-1]
+            filtered_pcm = np.clip(filtered, -32768, 32767).astype(np.int16)
+            energy = int(np.sqrt(np.mean(np.square(filtered_pcm.astype(np.float32)))))
+            power = np.square(np.abs(np.fft.rfft(samples * spectral_window)))
+            audible_energy = float(power[audible_band].sum())
+            voice_ratio = float(power[voice_band].sum() / audible_energy) if audible_energy > 0 else 0.0
+            voice_band_window.append(voice_ratio)
+            voice_like = voice_ratio >= _VOICE_BAND_MIN_RATIO
+            sustained_voice = (
+                len(voice_band_window) == voice_band_window.maxlen
+                and statistics.median(voice_band_window) >= _VOICE_BAND_MIN_RATIO
+            )
+            vad_speech = vad.is_speech(frame, rate)
+            calibrating = len(noise_energies) < calibration_frames
+            if calibrating:
+                noise_energies.append(energy)
+            noise_threshold = int(float(np.percentile(noise_energies, 95)) * noise_multiplier)
+            adaptive_threshold = max(minimum_threshold, noise_threshold)
+            speech_frame = not calibrating and vad_speech and voice_like and energy >= adaptive_threshold
+            confirmed_onset = speech_frame and sustained_voice
+            if not calibrating and not triggered and not voice_like and energy > 0:
+                noise_energies.append(energy)
+            if volume_callback:
+                volume_callback(raw_energy, adaptive_threshold)
+
+            if not triggered:
+                idle_frames += 1
+                pre_roll.append((frame, speech_frame))
+                trigger_window.append(confirmed_onset)
+                if sum(trigger_window) >= 5:
+                    triggered = True
+                    captured.extend(item for item, _ in pre_roll)
+                    voiced_frames = sum(1 for _, voiced in pre_roll if voiced)
+                    if voiced_frames * frame_ms >= min_speech_ms and activity_callback:
+                        activity_callback(True)
+                        activity_announced = True
+                    if len(captured) >= max_frames:
+                        return finish("max_phrase")
+                    continue
+                if idle_frames >= idle_limit:
+                    return finish("timeout")
+                continue
+
+            captured.append(frame)
+            if speech_frame:
+                voiced_frames += 1
+                if not activity_announced and voiced_frames * frame_ms >= min_speech_ms:
+                    if activity_callback:
+                        activity_callback(True)
+                    activity_announced = True
+                trailing_unvoiced = 0
+            else:
+                trailing_unvoiced += 1
+                if trailing_unvoiced >= silence_limit:
+                    return finish("silence")
+            if len(captured) >= max_frames:
+                return finish("max_phrase")
+
+    return finish("eof")
 
 
 @contextlib.contextmanager
@@ -56,8 +221,12 @@ class MicStream:
         self.rate, self.chunk, self.device_index = rate, chunk, device_index
         with no_stderr():
             self._audio = pyaudio.PyAudio()
-        self._queue = queue.Queue()
+        self._queue = queue.Queue(maxsize=max(8, rate * 2 // chunk))
         self._stream = None
+        self._frame_carry = b""
+        self._noise_energies = deque(maxlen=50)
+        self._capture_lock = threading.Lock()
+        self._suspended = threading.Event()
 
     def __enter__(self):
         with no_stderr():
@@ -77,110 +246,103 @@ class MicStream:
             self._stream.stop_stream()
             self._stream.close()
         self._audio.terminate()
-        self._queue.put(None)
+        with self._capture_lock:
+            self._clear_pending_locked()
+            self._queue.put_nowait(None)
 
     def _callback(self, in_data, frame_count, time_info, status):
-        self._queue.put(in_data)
+        with self._capture_lock:
+            if self._suspended.is_set():
+                return None, pyaudio.paContinue
+            if self._queue.full():
+                self._queue.get_nowait()
+            self._queue.put_nowait(in_data)
         return None, pyaudio.paContinue
 
-    def live_gen(
-        self, silence_limit=15, timeout=50, threshold=1000, verbose=False, stop_check=None, volume_callback=None
-    ):
-        """Generator that yields chunks until silence is detected."""
-        silent_chunks = 0
-        has_speech = False
+    def _clear_pending_locked(self):
+        self._frame_carry = b""
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                return
 
-        # Dynamic VAD state: Persist across generator restarts!
-        if not hasattr(self, "_dynamic_noise_floor"):
-            self._dynamic_noise_floor = threshold
-            self._current_threshold = threshold
+    def suspend(self):
+        """Drop microphone input until capture is resumed."""
+        with self._capture_lock:
+            self._suspended.set()
+            self._clear_pending_locked()
 
-        consecutive_speech = 0
-        consecutive_silence = 0
-        ui_is_listening = False
-        history = [False] * 5
+    def resume(self):
+        """Resume with only audio recorded after this call."""
+        with self._capture_lock:
+            self._clear_pending_locked()
+            self._suspended.clear()
 
+    def _frames(self, stop_check=None):
+        frame_bytes = self.rate * 20 // 1000 * 2
         while True:
             if stop_check and stop_check():
-                self.last_capture_had_speech = has_speech
-                break
+                return
+            with self._capture_lock:
+                if len(self._frame_carry) >= frame_bytes:
+                    frame = self._frame_carry[:frame_bytes]
+                    self._frame_carry = self._frame_carry[frame_bytes:]
+                else:
+                    frame = None
+            if frame is not None:
+                yield frame
+                if stop_check and stop_check():
+                    return
+                continue
             try:
                 chunk = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
             if chunk is None:
-                self.last_capture_had_speech = has_speech
-                break
-            yield chunk
+                return
+            if stop_check and stop_check():
+                return
+            with self._capture_lock:
+                if not self._suspended.is_set():
+                    self._frame_carry += chunk
 
-            data_np = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
-            energy = int(np.sqrt(np.mean(np.square(data_np)))) if len(data_np) > 0 else 0
+    def capture_phrase(
+        self,
+        silence_limit=15,
+        threshold=1000,
+        verbose=False,
+        stop_check=None,
+        ignore_check=None,
+        volume_callback=None,
+        activity_callback=None,
+    ) -> PhraseCapture:
+        """Capture one confirmed phrase without forwarding the idle wait."""
 
-            # Auto-calibrate threshold based on ambient noise
-            if energy > self._current_threshold:
-                consecutive_speech += 1
-                consecutive_silence = 0
-                if consecutive_speech > 30:
-                    # 3 seconds of completely unbroken mechanical noise (e.g. a passing car or fan spike).
-                    # Force adapt the noise floor.
-                    self._dynamic_noise_floor = energy
-                    self._current_threshold = max(threshold, int(self._dynamic_noise_floor * 2.0))
-                    consecutive_speech = 0
-            else:
-                consecutive_speech = 0
-                consecutive_silence += 1
-                if energy > 0:  # Ignore pure 0s from OS-level mute so we don't ruin the calibration
-                    # Use a slow Exponential Moving Average (EMA) to prevent single downward spikes
-                    # (e.g. USB audio dropouts) from dragging the threshold down and causing false positives.
-                    self._dynamic_noise_floor = (0.9 * self._dynamic_noise_floor) + (0.1 * energy)
-                    self._current_threshold = max(threshold, int(self._dynamic_noise_floor * 2.0))
-
-            # UI Debounce & Hangover logic
-            history.append(energy > self._current_threshold)
-            history.pop(0)
-
-            if energy == 0:
-                ui_is_listening = False
-                display_energy = 0
-            else:
-                if sum(history) >= 3:
-                    ui_is_listening = True
-                elif consecutive_silence >= silence_limit:
-                    ui_is_listening = False
-
-                if ui_is_listening:
-                    display_energy = max(energy, self._current_threshold + 1)
-                else:
-                    display_energy = min(energy, self._current_threshold)
-
+        def report_volume(energy: int, current_threshold: int):
             if volume_callback:
-                volume_callback(display_energy, self._current_threshold)
-
+                volume_callback(energy, current_threshold)
             if verbose:
-                # VU meter: 1 bar per 200 RMS, up to 6000
                 bars = min(30, energy // 200)
                 meter = "|" + "#" * bars + " " * (30 - bars) + "|"
-                sys.stderr.write(f"\r{meter} {energy:5} (thr:{self._current_threshold})")
+                sys.stderr.write(f"\r{meter} {energy:5} (thr:{current_threshold})")
                 sys.stderr.flush()
 
-            if ui_is_listening:
-                if not has_speech and verbose:
-                    sys.stderr.write("\n[vsh] Speech detected...\n")
-                has_speech = True
-                silent_chunks = 0
-            else:
-                silent_chunks += 1
-                if has_speech and consecutive_silence >= silence_limit:
-                    # Break the moment the UI hangover drops, preventing 1.5s lag
-                    if verbose:
-                        sys.stderr.write("\r\033[K")  # Clear the diagnostic line
-                    self.last_capture_had_speech = has_speech
-                    break
-                elif not has_speech and silent_chunks > timeout:
-                    if verbose:
-                        sys.stderr.write("\r\033[K")  # Clear the diagnostic line
-                    self.last_capture_had_speech = has_speech
-                    break
+        capture = detect_phrase(
+            self._frames(stop_check),
+            rate=self.rate,
+            threshold=threshold,
+            silence_limit=silence_limit,
+            stop_check=stop_check,
+            ignore_check=ignore_check,
+            volume_callback=report_volume,
+            activity_callback=activity_callback,
+            noise_energies=self._noise_energies,
+        )
+        if verbose:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
+        return capture
 
 
 if __name__ == "__main__":
@@ -188,9 +350,7 @@ if __name__ == "__main__":
     try:
         with MicStream() as stream:
             logger.info("Recording for 1 second...")
-            for i, _chunk in enumerate(stream.live_gen(timeout=10)):
-                if i > 10:
-                    break
+            stream.capture_phrase()
             logger.success("Audio capture OK.")
     except Exception as e:
         logger.error(f"Audio error: {e}")

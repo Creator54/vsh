@@ -20,7 +20,8 @@ from dataclasses import dataclass
 from loguru import logger
 
 from vsh.core.config import VshConfig
-from vsh.core.voice_input import VoiceInputThread
+from vsh.core.mic_state import PipeWireMicMonitor
+from vsh.core.voice_input import VoiceInputThread, VoiceState
 
 # ANSI escape sequences for cursor control.
 CURSOR_RESET = b"\033]112\a\033[0 q"
@@ -150,13 +151,14 @@ class PtyShell:
             volume_callback=self._volume_callback,
             state_callback=self._set_cursor_state,
         )
+        self.mic_monitor = PipeWireMicMonitor(self._set_system_mic_muted)
         self.pipeline_thread = None
-        self.is_listening = False
         self.old_tty_attrs = None
         self._interrupted = False
         self.cols = 80
         self.rows = 24
         self._last_energy = 0
+        self._last_threshold = self.config.stt.vad_threshold
         self._anim_frame = 0
         self._visual_mode = "none"
         self._pending_input = b""
@@ -168,6 +170,8 @@ class PtyShell:
         self._typing_until = 0.0
         self._alternate_screen = False
         self._pty_control_tail = b""
+        self._current_cursor_state = None
+        self._system_mic_muted = None
 
         # Shell identity and live execution state exposed over HTTP.
         self.shell_name = os.path.basename(self.inner_shell)
@@ -195,7 +199,7 @@ class PtyShell:
 
             processor = self.voice_handler or self.thinker
             if processor:
-                self._set_cursor_state("thinking")
+                self._set_cursor_state(VoiceState.THINKING)
                 try:
                     prompt = transcript
                     if not self.voice_handler:
@@ -204,11 +208,11 @@ class PtyShell:
                     self._dispatch_response(processor.ask(prompt))
                 except Exception as e:
                     self._publish_reply(f"vsh: {e}", "")
-                    self._set_cursor_state("idle")
+                    self._set_cursor_state(self._resting_voice_state())
             else:
                 # Direct injection
                 self._inject_command(transcript)
-                self._set_cursor_state("idle")
+                self._set_cursor_state(self._resting_voice_state())
 
             self.stt_queue.task_done()
 
@@ -230,14 +234,16 @@ class PtyShell:
         reply = parse_voice_reply(raw)
         visible_speech = reply.speech
         if reply.speech and self.tts_provider:
-            self._set_cursor_state("speaking")
-            if self._speak(reply.speech):
+            self._set_cursor_state(VoiceState.SPEAKING)
+            spoke = self._speak(reply.speech)
+            self.voice_thread.suppress_input(0.3)
+            if spoke:
                 visible_speech = ""
         if reply.command:
-            self._set_cursor_state("typing")
+            self._set_cursor_state(VoiceState.TYPING)
         if visible_speech or reply.command:
             self._publish_reply(visible_speech, reply.command)
-        self._set_cursor_state("idle")
+        self._set_cursor_state(self._resting_voice_state())
 
     def _setup_terminal(self):
         """Save terminal state and enter raw mode (skip if no TTY, e.g. --serve)."""
@@ -341,46 +347,66 @@ class PtyShell:
     def _volume_callback(self, energy: int, threshold: int):
         self._last_energy = energy
         self._last_threshold = threshold
-        if not getattr(self, "is_listening", False):
-            return
 
-        pipeline = getattr(self, "_pipeline_state", None)
+    def _resting_voice_state(self) -> VoiceState | None:
+        if self.voice_thread.is_listening:
+            return VoiceState.IDLE
+        return None
 
-        if pipeline:
-            state = pipeline
-        elif energy > threshold:
-            state = "listening_active"
-        else:
-            state = "listening_idle"
+    def _effective_cursor_state(self) -> VoiceState | None:
+        if not self.voice_thread.is_listening:
+            return None
+        if self._system_mic_muted is True:
+            return VoiceState.MUTED
+        state = self._current_cursor_state
+        if state is not None:
+            state = VoiceState(state)
+        if state in (None, VoiceState.MUTED):
+            return VoiceState.IDLE
+        return state
 
-        current = getattr(self, "_current_cursor_state", "idle")
-        if current != state:
-            self._set_cursor_state(state)
-
-    def _set_cursor_state(self, state: str, text: str = None):
+    def _set_cursor_state(self, state: VoiceState | str | None):
         """Update pipeline state and its visual indicator."""
-
-        if state in ("transcribing", "thinking", "typing", "speaking"):
-            self._pipeline_state = state
+        state = VoiceState(state) if state is not None else None
+        if state in (VoiceState.TRANSCRIBING, VoiceState.THINKING, VoiceState.TYPING, VoiceState.SPEAKING):
             if hasattr(self, "voice_thread"):
-                self.voice_thread.is_processing = True
-        elif state == "idle":
-            self._pipeline_state = None
+                self.voice_thread.set_processing(True)
+        elif state in (None, VoiceState.MUTED, VoiceState.IDLE):
             if hasattr(self, "voice_thread"):
-                self.voice_thread.is_processing = False
+                self.voice_thread.set_processing(False)
 
         self._current_cursor_state = state
         if self._visual_mode == "cursor":
-            self._render_cursor_state(state)
+            self._render_cursor_state(self._effective_cursor_state())
         elif self._visual_mode == "graphics":
             self._render_graphics_badge()
 
+    def _set_system_mic_muted(self, muted: bool | None):
+        self._system_mic_muted = muted
+        if hasattr(self, "voice_thread"):
+            self.voice_thread.set_system_mic_muted(muted)
+        if self._visual_mode == "cursor":
+            self._render_cursor_state(self._effective_cursor_state())
+        elif self._visual_mode == "graphics":
+            self._render_graphics_badge()
+
+    def voice_status(self) -> dict:
+        state = self._effective_cursor_state()
+        phase = self._current_cursor_state
+        return {
+            "enabled": self.voice_thread.is_listening,
+            "mic_muted": self._system_mic_muted,
+            "phase": str(phase) if phase is not None else None,
+            "visual_state": str(state) if state is not None else None,
+        }
+
     def _user_started_typing(self):
         self._typing_until = time.monotonic() + 0.6
+        self.voice_thread.suppress_input(0.6)
         if self._visual_mode == "graphics":
             self._delete_graphics_badge()
         elif self._visual_mode == "cursor":
-            self._render_cursor_state("typing")
+            self._render_cursor_state(VoiceState.TYPING)
 
     def _track_pty_controls(self, data: bytes):
         """Track alternate-screen transitions without parsing the whole VT stream."""
@@ -400,20 +426,19 @@ class PtyShell:
             sys.stdout.buffer.flush()
 
     def _toggle_listening(self):
-        self.is_listening = self.voice_thread.toggle_listening()
+        enabled = self.voice_thread.toggle_listening()
+        if enabled:
+            self.voice_thread.suppress_input(0.6)
         if self.verbose:
             m = (
                 f"LISTENING (Press {self.config.keybinds.toggle_listen} or Ctrl+G to pause)"
-                if self.is_listening
+                if enabled
                 else "STOPPED"
             )
-            c = "1;35" if self.is_listening else "36"
+            c = "1;35" if enabled else "36"
             self._notify(m, color=c)
-        if self.is_listening:
+        if enabled:
             sys.stdout.buffer.write(b"\a")
-            self._set_cursor_state("listening_idle")
-        else:
-            self._set_cursor_state("idle")
 
     def _inject_command(self, cmd: str):
         """Inject text directly into the PTY."""
@@ -496,7 +521,7 @@ class PtyShell:
             signal.signal(signal.SIGWINCH, self._handle_sigwinch)
             self._handle_sigwinch(None, None)
 
-            # Start background STT thread
+            self.mic_monitor.start()
             self.voice_thread.start()
 
             # The pipeline worker handles LLM/Thinking
@@ -525,9 +550,11 @@ class PtyShell:
                 self._io_loop()
             finally:
                 # Cleanup
-                self._restore_terminal()
+                self.mic_monitor.stop()
+                self.mic_monitor.join(timeout=2.0)
                 self.voice_thread.stop()
                 self.voice_thread.join(timeout=2.0)
+                self._restore_terminal()
                 self.stt_queue.put(None)  # Signal pipeline to stop
                 # Graceful child shutdown with timeout
                 for _ in range(50):  # 5 seconds
@@ -546,35 +573,37 @@ class PtyShell:
                     except ProcessLookupError:
                         pass
 
-    def _render_cursor_state(self, state: str):
+    def _render_cursor_state(self, state: VoiceState | str | None):
         """Fallback indicator that never writes into terminal cells."""
-        if not self.is_listening:
+        state = VoiceState(state) if state is not None else None
+        if state is None:
             sequence = CURSOR_RESET
         else:
-            state = "listening_idle" if state == "idle" else state
             sequence = {
-                "listening_idle": b"\033]12;#00d2ff\a\033[6 q",
-                "listening_active": b"\033]12;#ff00b4\a\033[1 q",
-                "transcribing": b"\033]12;#00d2ff\a\033[3 q",
-                "thinking": b"\033]12;#ffae00\a\033[4 q",
-                "typing": b"\033]12;#32dc64\a\033[6 q",
-                "speaking": b"\033]12;#32dc64\a\033[5 q",
+                VoiceState.MUTED: b"\033]12;#ff8232\a\033[4 q",
+                VoiceState.IDLE: b"\033]12;#00d2ff\a\033[6 q",
+                VoiceState.LISTENING: b"\033]12;#ff00b4\a\033[1 q",
+                VoiceState.TRANSCRIBING: b"\033]12;#00d2ff\a\033[3 q",
+                VoiceState.THINKING: b"\033]12;#ffae00\a\033[4 q",
+                VoiceState.TYPING: b"\033]12;#32dc64\a\033[6 q",
+                VoiceState.SPEAKING: b"\033]12;#32dc64\a\033[5 q",
             }.get(state, CURSOR_RESET)
         sys.stdout.buffer.write(sequence)
         sys.stdout.buffer.flush()
 
-    def _icon_pixels(self, state: str, phase: int) -> bytes:
+    def _icon_pixels(self, state: VoiceState | str, phase: int) -> bytes:
         """Build a tiny transparent RGBA icon without an image dependency."""
+        state = VoiceState(state)
         colors = {
-            "listening_idle": (0, 210, 255),
-            "listening_active": (255, 0, 180),
-            "transcribing": (0, 210, 255),
-            "thinking": (255, 174, 0),
-            "typing": (50, 220, 100),
-            "speaking": (50, 220, 100),
+            VoiceState.MUTED: (255, 130, 50),
+            VoiceState.IDLE: (0, 210, 255),
+            VoiceState.LISTENING: (255, 0, 180),
+            VoiceState.TRANSCRIBING: (0, 210, 255),
+            VoiceState.THINKING: (255, 174, 0),
+            VoiceState.TYPING: (50, 220, 100),
+            VoiceState.SPEAKING: (50, 220, 100),
         }
-        state = "listening_idle" if state == "idle" else state
-        color = colors.get(state, colors["listening_idle"])
+        color = colors.get(state, colors[VoiceState.IDLE])
         pixels = bytearray(16 * 16 * 4)
 
         def put(x: int, y: int, alpha: int = 255):
@@ -590,7 +619,13 @@ class PtyShell:
             for y in range(y1, y2 + 1):
                 put(x, y, alpha)
 
-        if state == "listening_idle":
+        if state == VoiceState.MUTED:
+            step = phase % 4
+            left_alpha = 230 if step < 2 else 130
+            right_alpha = 130 if step < 2 else 230
+            vline(6, 5, 10, left_alpha)
+            vline(9, 5, 10, right_alpha)
+        elif state == VoiceState.IDLE:
             # Soft breathing orb, matching the old `•` / `(•)` / `◖•◗` HUD.
             put(7, 7)
             put(8, 7)
@@ -604,7 +639,7 @@ class PtyShell:
             )
             for x, y in rings[phase % len(rings)]:
                 put(x, y, 170 if phase < 3 else 120)
-        elif state == "listening_active":
+        elif state == VoiceState.LISTENING:
             # Responsive audio bars, replacing the literal microphone glyph.
             threshold = max(1, getattr(self, "_last_threshold", self.config.stt.vad_threshold))
             energy = getattr(self, "_last_energy", 0)
@@ -614,19 +649,19 @@ class PtyShell:
                 height = min(9, heights[(index + phase) % len(heights)] + level)
                 top = 8 - height // 2
                 vline(x, top, top + height - 1)
-        elif state == "transcribing":
+        elif state == VoiceState.TRANSCRIBING:
             heights = (2, 5, 8, 3, 6, 10, 4, 7, 3, 9, 5, 2)
             for index, x in enumerate(range(2, 14)):
                 height = heights[(index + phase) % len(heights)]
                 top = 8 - height // 2
                 vline(x, top, top + height - 1)
-        elif state == "thinking":
+        elif state == VoiceState.THINKING:
             for index, x in enumerate((4, 8, 12)):
                 alpha = 255 if index == phase % 3 else 100
                 for px in (x - 1, x):
                     for py in (7, 8):
                         put(px, py, alpha)
-        elif state == "typing":
+        elif state == VoiceState.TYPING:
             hline(2, 13, 4)
             hline(2, 13, 12)
             vline(2, 5, 11)
@@ -638,7 +673,7 @@ class PtyShell:
             hline(5, 10, 11)
             if phase % 2:
                 vline(11, 8, 10)
-        elif state == "speaking":
+        elif state == VoiceState.SPEAKING:
             vline(3, 7, 9)
             vline(4, 6, 10)
             vline(5, 5, 11)
@@ -656,55 +691,54 @@ class PtyShell:
     def _delete_graphics_badge(self):
         if not self._graphics_visible:
             return
-        sequence = f"\033_Ga=d,d=I,i={self._image_id},p={self._placement_id},q=2;\033\\".encode()
+        sequence = self._graphics_delete_sequence()
         sys.stdout.buffer.write(self._terminal_sequence(sequence) + b"\033[?25h")
         sys.stdout.buffer.flush()
         self._graphics_visible = False
         self._last_graphics_signature = None
 
+    def _graphics_delete_sequence(self) -> bytes:
+        return f"\033_Ga=d,d=I,i={self._image_id},p={self._placement_id},q=2;\033\\".encode()
+
     def _render_graphics_badge(self):
         """Render the animated two-cell state cursor at the current terminal cursor."""
-        if (
-            not self.is_listening
-            or self.cols < 2
-            or self._alternate_screen
-            or time.monotonic() < self._typing_until
-        ):
+        if self.cols < 2 or self._alternate_screen or time.monotonic() < self._typing_until:
             self._delete_graphics_badge()
             return
 
-        state = getattr(self, "_current_cursor_state", "idle")
+        state = self._effective_cursor_state()
+        if state is None:
+            self._delete_graphics_badge()
+            return
         phase = self._anim_frame
         self._anim_frame += 1
         animation_phase = (
-            phase % 12
-            if state == "transcribing"
+            phase % 4
+            if state == VoiceState.MUTED
+            else phase % 12
+            if state == VoiceState.TRANSCRIBING
             else phase % 3
-            if state == "thinking"
+            if state == VoiceState.THINKING
             else phase % 4
-            if state in ("listening_idle", "listening_active")
+            if state in (VoiceState.IDLE, VoiceState.LISTENING)
             else phase % 2
         )
         pixels = self._icon_pixels(state, animation_phase)
         payload = base64.standard_b64encode(pixels)
-        control = (
-            f"a=T,f=32,s=16,v=16,i={self._image_id},p={self._placement_id},"
-            "c=2,r=1,C=1,z=1,q=2"
-        ).encode()
+        transmit_control = f"a=t,f=32,s=16,v=16,i={self._image_id},q=2".encode()
+        place_control = (f"a=p,i={self._image_id},p={self._placement_id},c=2,r=1,C=1,z=1,q=2").encode()
         # Paint the badge at the top-right edge as a non-blocking HUD.  The
         # shell cursor is saved/restored so this never inserts text or steals
         # the user's input position.
         row = 1
         col = max(1, self.cols - 1)
-        sequence = (
-            f"\033[s\033[{row};{col}H\033[?25l".encode()
-            + b"\033_G"
-            + control
-            + b";"
-            + payload
-            + b"\033\\\033[u"
+        cursor_visibility = b"\033[?25h" if state == VoiceState.MUTED else b"\033[?25l"
+        transmit = b"\033_G" + transmit_control + b";" + payload + b"\033\\"
+        place = (
+            f"\033[s\033[{row};{col}H".encode() + b"\033_G" + place_control + b";" + b"\033\\\033[u" + cursor_visibility
         )
-        sys.stdout.buffer.write(self._terminal_sequence(sequence))
+        clear = self._terminal_sequence(self._graphics_delete_sequence()) if self._graphics_visible else b""
+        sys.stdout.buffer.write(clear + self._terminal_sequence(transmit) + self._terminal_sequence(place))
         sys.stdout.buffer.flush()
         self._graphics_visible = True
         self._last_graphics_render = time.monotonic()
@@ -788,7 +822,7 @@ class PtyShell:
                 elif self._visual_mode == "cursor" and self._typing_until:
                     if time.monotonic() >= self._typing_until:
                         self._typing_until = 0.0
-                        self._render_cursor_state(getattr(self, "_current_cursor_state", "idle"))
+                        self._render_cursor_state(self._effective_cursor_state())
 
             if self._interrupted:
                 logger.info("Interrupted by signal")

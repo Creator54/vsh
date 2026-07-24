@@ -11,26 +11,45 @@ from unittest.mock import MagicMock, patch
 import vsh.core.pty_shell as pty_module
 from vsh.core.config import VshConfig, load_config
 from vsh.core.pty_shell import CURSOR_RESET, PtyShell
+from vsh.core.voice_input import VoiceState
 
 
 class _FakeVoiceThread:
-    is_listening = False
+    def __init__(self, state_callback=None):
+        self.is_listening = False
+        self.is_processing = False
+        self.system_mic_muted = None
+        self.state_callback = state_callback
 
     def toggle_listening(self):
         self.is_listening = not self.is_listening
+        if self.state_callback:
+            self.state_callback(VoiceState.IDLE if self.is_listening else None)
         return self.is_listening
+
+    def set_system_mic_muted(self, muted):
+        self.system_mic_muted = muted
+
+    def set_processing(self, processing):
+        self.is_processing = processing
+
+    def suppress_input(self, duration=0.6):
+        pass
 
 
 class OverlayTests(unittest.TestCase):
     def _make_shell(self, mode="auto"):
         cfg = VshConfig()
         cfg.shell.overlay_mode = mode
-        with patch("vsh.core.pty_shell.VoiceInputThread", return_value=_FakeVoiceThread()):
+        with patch(
+            "vsh.core.pty_shell.VoiceInputThread",
+            side_effect=lambda *_args, **kwargs: _FakeVoiceThread(kwargs.get("state_callback")),
+        ):
             shell = PtyShell(cfg, thinker=None, verbose=False, tts_provider=None)
         shell.master_fd = 7
         shell.rows, shell.cols = 24, 80
-        shell._current_cursor_state = "listening_idle"
-        shell.is_listening = True
+        shell._current_cursor_state = VoiceState.IDLE
+        shell.voice_thread.is_listening = True
         return shell
 
     def test_default_overlay_mode_is_auto(self):
@@ -51,9 +70,12 @@ class OverlayTests(unittest.TestCase):
         shell = self._make_shell("auto")
         shell.old_tty_attrs = object()
         response = f"\x1b_Gi={shell._image_id};OK\x1b\\\x1b[?1;2cuser".encode()
-        with patch("sys.stdout") as stdout, patch("sys.stdin.fileno", return_value=0), patch(
-            "select.select", return_value=([0], [], [])
-        ), patch("os.read", return_value=response):
+        with (
+            patch("sys.stdout") as stdout,
+            patch("sys.stdin.fileno", return_value=0),
+            patch("select.select", return_value=([0], [], [])),
+            patch("os.read", return_value=response),
+        ):
             stdout.buffer = MagicMock()
             self.assertTrue(shell._probe_graphics_support(timeout=0.25))
         self.assertEqual(shell._pending_input, b"user")
@@ -61,9 +83,12 @@ class OverlayTests(unittest.TestCase):
     def test_probe_rejects_device_attributes_without_graphics(self):
         shell = self._make_shell("auto")
         shell.old_tty_attrs = object()
-        with patch("sys.stdout") as stdout, patch("sys.stdin.fileno", return_value=0), patch(
-            "select.select", return_value=([0], [], [])
-        ), patch("os.read", return_value=b"\x1b[?1;2c"):
+        with (
+            patch("sys.stdout") as stdout,
+            patch("sys.stdin.fileno", return_value=0),
+            patch("select.select", return_value=([0], [], [])),
+            patch("os.read", return_value=b"\x1b[?1;2c"),
+        ):
             stdout.buffer = MagicMock()
             self.assertFalse(shell._probe_graphics_support(timeout=0.25))
 
@@ -88,13 +113,51 @@ class OverlayTests(unittest.TestCase):
             stdout.buffer = buf
             shell._render_graphics_badge()
         written = buf.write.call_args[0][0]
-        self.assertIn(b"a=T", written)
+        self.assertIn(b"a=t", written)
+        self.assertIn(b"a=p", written)
+        self.assertLess(written.index(b"a=t"), written.index(b"a=p"))
         self.assertIn(b"c=2,r=1,C=1,z=1", written)
         self.assertNotIn(b"\033[K", written)
         self.assertNotIn(b"Listening", written)
         self.assertNotIn(b"\033[1;35m", written)
         self.assertIn(b"\033[?25l", written)
         self.assertIn(b"\033[1;79H", written)
+
+    def test_inactive_vsh_removes_the_graphics_badge(self):
+        shell = self._make_shell("kitty")
+        shell._visual_mode = "graphics"
+        shell._graphics_visible = True
+        buf = MagicMock()
+
+        with patch("sys.stdout") as stdout:
+            stdout.buffer = buf
+            shell.voice_thread.is_listening = False
+            shell._current_cursor_state = None
+            shell._render_graphics_badge()
+
+        written = b"".join(call.args[0] for call in buf.write.call_args_list)
+        self.assertIn(b"a=d,d=I", written)
+        self.assertNotIn(b"a=t", written)
+        self.assertNotIn(b"a=p", written)
+        self.assertIn(b"\033[?25h", written)
+        self.assertFalse(shell._graphics_visible)
+
+    def test_graphics_redraw_deletes_the_previous_frame_first(self):
+        shell = self._make_shell("kitty")
+        shell._visual_mode = "graphics"
+        buf = MagicMock()
+
+        with patch("sys.stdout") as stdout:
+            stdout.buffer = buf
+            shell._set_system_mic_muted(True)
+            shell._render_graphics_badge()
+            buf.reset_mock()
+            shell._set_system_mic_muted(False)
+            shell._render_graphics_badge()
+
+        written = b"".join(call.args[0] for call in buf.write.call_args_list)
+        self.assertIn(b"a=d,d=I", written)
+        self.assertLess(written.index(b"a=d,d=I"), written.index(b"a=t"))
 
     def test_typing_restores_native_cursor_and_delays_image(self):
         shell = self._make_shell("kitty")
@@ -108,6 +171,16 @@ class OverlayTests(unittest.TestCase):
         self.assertIn(b"a=d,d=I", written)
         self.assertIn(b"\033[?25h", written)
         self.assertGreater(shell._typing_until, 10.0)
+        self.assertEqual(shell._current_cursor_state, VoiceState.IDLE)
+
+    def test_typing_temporarily_suppresses_microphone_input(self):
+        shell = self._make_shell("none")
+        shell.voice_thread.suppress_input = MagicMock()
+
+        with patch("time.monotonic", return_value=10.0):
+            shell._user_started_typing()
+
+        shell.voice_thread.suppress_input.assert_called_once_with(0.6)
 
     def test_graphics_cursor_suppressed_in_alternate_screen(self):
         shell = self._make_shell("kitty")
@@ -125,16 +198,115 @@ class OverlayTests(unittest.TestCase):
         buf = MagicMock()
         with patch("sys.stdout") as stdout:
             stdout.buffer = buf
-            shell._set_cursor_state("listening_active")
+            shell._set_cursor_state(VoiceState.LISTENING)
         written = b"".join(call.args[0] for call in buf.write.call_args_list)
         self.assertIn(b"\033]12;", written)
         self.assertNotIn(b"\033[K", written)
         self.assertNotIn(b"vsh:", written)
 
-    def test_structured_voice_reply_splits_speech_and_command(self):
-        reply = pty_module.parse_voice_reply(
-            '{"speech":"Opening Aether.","command":"cd /home/creator54 && Aether"}'
+    def test_raw_volume_updates_intensity_without_changing_state(self):
+        shell = self._make_shell("kitty")
+        shell._current_cursor_state = VoiceState.IDLE
+
+        shell._volume_callback(9000, 1000)
+
+        self.assertEqual(shell._current_cursor_state, VoiceState.IDLE)
+        self.assertEqual(shell._last_energy, 9000)
+
+    def test_system_mic_state_is_independent_from_vsh_activation(self):
+        shell = self._make_shell("none")
+
+        shell._set_system_mic_muted(True)
+        self.assertTrue(shell.voice_thread.is_listening)
+        self.assertEqual(shell._effective_cursor_state(), VoiceState.MUTED)
+
+        shell._set_system_mic_muted(False)
+        self.assertTrue(shell.voice_thread.is_listening)
+        self.assertEqual(shell._effective_cursor_state(), VoiceState.IDLE)
+
+    def test_vsh_disabled_has_no_visual_even_when_system_mic_is_muted(self):
+        shell = self._make_shell("none")
+        shell._set_system_mic_muted(True)
+
+        shell._toggle_listening()
+
+        self.assertFalse(shell.voice_thread.is_listening)
+        self.assertIsNone(shell._effective_cursor_state())
+
+    def test_system_mute_overrides_processing_visual(self):
+        shell = self._make_shell("none")
+        shell._set_cursor_state(VoiceState.THINKING)
+
+        shell._set_system_mic_muted(True)
+
+        self.assertEqual(shell._effective_cursor_state(), VoiceState.MUTED)
+
+    def test_voice_status_uses_the_same_effective_state_as_the_hud(self):
+        shell = self._make_shell("none")
+        shell._set_system_mic_muted(True)
+
+        self.assertEqual(
+            shell.voice_status(),
+            {
+                "enabled": True,
+                "mic_muted": True,
+                "phase": "idle",
+                "visual_state": "muted",
+            },
         )
+
+    def test_toggle_uses_idle_and_inactive_states(self):
+        shell = self._make_shell("none")
+        shell.voice_thread.is_listening = False
+
+        with patch("time.monotonic", side_effect=(10.0, 11.0)):
+            shell._toggle_listening()
+            self.assertEqual(shell._current_cursor_state, VoiceState.IDLE)
+            shell._toggle_listening()
+        self.assertIsNone(shell._current_cursor_state)
+        self.assertIsNone(shell._effective_cursor_state())
+
+    def test_rapid_toggle_events_are_not_dropped(self):
+        shell = self._make_shell("none")
+        shell.voice_thread.is_listening = False
+
+        with patch("time.monotonic", side_effect=(10.0, 10.05)):
+            shell._toggle_listening()
+            shell._toggle_listening()
+
+        self.assertFalse(shell.voice_thread.is_listening)
+        self.assertIsNone(shell._current_cursor_state)
+
+    def test_resting_visual_uses_the_microphone_actual_state(self):
+        shell = self._make_shell("none")
+        shell._set_system_mic_muted(True)
+
+        self.assertEqual(shell._effective_cursor_state(), VoiceState.MUTED)
+
+        shell._set_system_mic_muted(False)
+
+        self.assertEqual(shell._effective_cursor_state(), VoiceState.IDLE)
+
+    def test_processing_returns_to_muted_when_mic_was_toggled_off(self):
+        shell = self._make_shell("none")
+        shell._set_system_mic_muted(True)
+        shell._set_cursor_state(VoiceState.THINKING)
+
+        shell._dispatch_response('{"speech":"","command":null}')
+
+        self.assertEqual(shell._current_cursor_state, VoiceState.IDLE)
+        self.assertEqual(shell._effective_cursor_state(), VoiceState.MUTED)
+
+    def test_response_returns_to_inactive_when_voice_was_never_enabled(self):
+        shell = self._make_shell("none")
+        shell.voice_thread.is_listening = False
+
+        shell._dispatch_response('{"speech":"Done.","command":null}')
+
+        self.assertIsNone(shell._current_cursor_state)
+
+    def test_structured_voice_reply_splits_speech_and_command(self):
+        reply = pty_module.parse_voice_reply('{"speech":"Opening Aether.","command":"cd /home/creator54 && Aether"}')
 
         self.assertEqual(reply.speech, "Opening Aether.")
         self.assertEqual(reply.command, "cd /home/creator54 && Aether")
@@ -198,6 +370,29 @@ class OverlayTests(unittest.TestCase):
             [("speech", "Opening it."), ("bridge", "", "cd /tmp")],
         )
 
+    def test_speaker_output_suppresses_its_acoustic_tail(self):
+        shell = self._make_shell("none")
+        shell.tts_provider = object()
+        shell._speak = lambda _text: True
+        shell.voice_thread.suppress_input = MagicMock()
+
+        shell._dispatch_response('{"speech":"Opening it.","command":null}')
+
+        shell.voice_thread.suppress_input.assert_called_once_with(0.3)
+
+    def test_spoken_command_uses_speaking_typing_idle_order(self):
+        shell = self._make_shell("none")
+        shell.tts_provider = object()
+        shell._speak = lambda _text: True
+
+        with patch.object(shell, "_set_cursor_state") as set_state, patch.object(shell, "_publish_reply"):
+            shell._dispatch_response('{"speech":"Opening it.","command":"cd /tmp"}')
+
+        self.assertEqual(
+            [call.args[0] for call in set_state.call_args_list],
+            [VoiceState.SPEAKING, VoiceState.TYPING, VoiceState.IDLE],
+        )
+
     def test_failed_speaker_prints_speech_before_command(self):
         shell = self._make_shell("none")
         shell.tts_provider = object()
@@ -215,9 +410,11 @@ class OverlayTests(unittest.TestCase):
         shell.shell_name = "fish"
         shell.shell_pid = 4321
 
-        with tempfile.TemporaryDirectory() as runtime, patch.dict(
-            os.environ, {"XDG_RUNTIME_DIR": runtime}
-        ), patch("os.kill") as kill:
+        with (
+            tempfile.TemporaryDirectory() as runtime,
+            patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}),
+            patch("os.kill") as kill,
+        ):
             shell._publish_reply("Voice response", "pwd")
             response = Path(runtime) / "vsh" / "4321.response"
             command = Path(runtime) / "vsh" / "4321.command"
@@ -237,9 +434,11 @@ class OverlayTests(unittest.TestCase):
         shell.shell_name = "fish"
         shell.shell_pid = 4321
 
-        with tempfile.TemporaryDirectory() as runtime, patch.dict(
-            os.environ, {"XDG_RUNTIME_DIR": runtime}
-        ), patch("os.kill"):
+        with (
+            tempfile.TemporaryDirectory() as runtime,
+            patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}),
+            patch("os.kill"),
+        ):
             shell._publish_reply("", "cd /tmp")
             bridge = Path(runtime) / "vsh"
 
@@ -252,9 +451,7 @@ class OverlayTests(unittest.TestCase):
         shell.shell_name = "fish"
         shell.shell_pid = 4321
 
-        with tempfile.TemporaryDirectory() as home, patch.dict(
-            os.environ, {"HOME": home}
-        ), patch("os.kill"):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}), patch("os.kill"):
             os.environ.pop("XDG_RUNTIME_DIR", None)
             shell._publish_reply("Voice response", "")
 
@@ -296,8 +493,9 @@ class OverlayTests(unittest.TestCase):
         shell.old_tty_attrs = object()
         shell._visual_mode = "cursor"
 
-        with patch("sys.stdout") as stdout, patch(
-            "termios.tcsetattr", side_effect=termios.error(5, "Input/output error")
+        with (
+            patch("sys.stdout") as stdout,
+            patch("termios.tcsetattr", side_effect=termios.error(5, "Input/output error")),
         ):
             stdout.buffer.write.side_effect = BrokenPipeError
             shell._restore_terminal()

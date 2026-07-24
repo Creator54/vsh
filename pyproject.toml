@@ -14,6 +14,7 @@ dependencies = [
     "boto3>=1.43.36",
     "google-cloud-speech>=2.40.0",
     "inquirerpy>=0.3.4",
+    "webrtcvad-wheels>=2.0.14",
 ]
 
 [project.scripts]

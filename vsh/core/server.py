@@ -9,6 +9,16 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
+def health_payload(shell):
+    return {
+        "status": "ok",
+        "shell": shell.shell_name,
+        "pid": shell.shell_pid,
+        "state": shell.shell_state,
+        "voice": shell.voice_status(),
+    }
+
+
 def _tools_schema(shell):
     return [
         {
@@ -39,15 +49,7 @@ def make_handler(shell):
 
         def do_GET(self):
             if self.path.rstrip("/") == "/health":
-                self._send(
-                    200,
-                    {
-                        "status": "ok",
-                        "shell": shell.shell_name,
-                        "pid": shell.shell_pid,
-                        "state": shell.shell_state,
-                    },
-                )
+                self._send(200, health_payload(shell))
             elif self.path.rstrip("/") == "/tools":
                 self._send(200, {"instance_id": f"vsh:{shell.shell_name}", "tools": _tools_schema(shell)})
             elif self.path.rstrip("/") == "/io/output":

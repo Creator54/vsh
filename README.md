@@ -7,6 +7,7 @@ An interactive voice-controlled terminal wrapper with pluggable STT/TTS and LLM 
 - Control Bash, Zsh, or Fish by voice.
 - Use Ollama, OpenAI, Anthropic, or any CLI command as the LLM.
 - Pick local, cloud, or custom HTTP speech providers.
+- Filter steady background noise with ambient-calibrated WebRTC voice detection.
 
 ## Installation
 
@@ -29,8 +30,8 @@ nix profile install github:creator54/vsh
   - `--verbose`: show logs.
   - `--echo`: return transcripts without an LLM.
   - `--serve --port 8770`: expose the live shell over loopback HTTP.
-- `vsh setup`: configure the LLM, microphone, and keybind.
-- `vsh bind`: change the microphone keybind.
+- `vsh setup`: configure the LLM, microphone, and VSH keybind.
+- `vsh bind`: change the VSH toggle keybind.
 - `vsh stt [--file <audio.wav>]`: transcribe the microphone or a WAV file.
 - `vsh tts "<text>" [--save <out.wav>] [--stream]`: speak or save text.
 
@@ -57,6 +58,9 @@ nix profile install github:creator54/vsh
 
 ## Keybinds
 
+- `Ctrl+]`: toggle VSH voice capture.
+  - Off: remove the HUD and restore the normal cursor.
+  - On: follow the default microphone mute state on PipeWire.
 - Kitty may need explicit mappings for modified symbols:
   - `Ctrl+,`: `map ctrl+, send_text all \x1b[44;5u`
   - `Ctrl+Backspace`: `map ctrl+backspace send_text all \x1b[127;5u`

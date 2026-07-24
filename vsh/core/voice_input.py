@@ -2,6 +2,7 @@ import queue
 import re
 import threading
 import time
+from enum import StrEnum
 
 from loguru import logger
 
@@ -12,10 +13,24 @@ _SILENCE_HALLUCINATIONS = {
 }
 
 
+class VoiceState(StrEnum):
+    MUTED = "muted"
+    IDLE = "idle"
+    LISTENING = "listening"
+    TRANSCRIBING = "transcribing"
+    THINKING = "thinking"
+    TYPING = "typing"
+    SPEAKING = "speaking"
+
+
 def _is_silence_hallucination(text: str) -> bool:
     """Recognize stock Whisper captions commonly produced from non-speech."""
     normalized = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
     return normalized in _SILENCE_HALLUCINATIONS
+
+
+def _is_valid_transcript(text: str) -> bool:
+    return any(character.isalnum() for character in text) and not _is_silence_hallucination(text)
 
 
 class VoiceInputThread(threading.Thread):
@@ -46,9 +61,20 @@ class VoiceInputThread(threading.Thread):
         self.model_loaded = False
         self.stt_provider = None
         self.is_processing = False
+        self.system_mic_muted = None
 
         # Events to coordinate toggling without busy loops
         self._toggle_event = threading.Event()
+        self._suppress_until = 0.0
+        self._processing_lock = threading.Lock()
+        self._active_stream = None
+
+    def suppress_input(self, duration: float = 0.6):
+        """Discard microphone frames caused by a known terminal keypress."""
+        self._suppress_until = max(self._suppress_until, time.monotonic() + duration)
+
+    def _input_suppressed(self) -> bool:
+        return time.monotonic() < self._suppress_until
 
     def load_model(self):
         """Lazy load the STT model on first use."""
@@ -68,11 +94,14 @@ class VoiceInputThread(threading.Thread):
     def toggle_listening(self) -> bool:
         """Toggle listening state and return the new state."""
         self.is_listening = not self.is_listening
-        if self.is_listening:
-            self.load_model()
-            # Wake up the thread if it was waiting
-            self._toggle_event.set()
+        self._toggle_event.set()
+        if self.state_callback:
+            self.state_callback(VoiceState.IDLE if self.is_listening else None)
         return self.is_listening
+
+    def set_system_mic_muted(self, muted: bool | None):
+        self.system_mic_muted = muted
+        self._toggle_event.set()
 
     def stop(self):
         """Signal the thread to shut down completely."""
@@ -80,10 +109,85 @@ class VoiceInputThread(threading.Thread):
         self.is_listening = False
         self._toggle_event.set()
 
+    def _capture_enabled(self) -> bool:
+        return self.is_listening and self.system_mic_muted is not True
+
+    def _resting_state(self) -> VoiceState | None:
+        return VoiceState.IDLE if self.is_listening else None
+
+    def _set_active_stream(self, stream):
+        with self._processing_lock:
+            self._active_stream = stream
+            if stream is not None and self.is_processing:
+                stream.suspend()
+
+    def set_processing(self, processing: bool):
+        """Pause capture while a voice request is being handled."""
+        with self._processing_lock:
+            if self.is_processing == processing:
+                return
+            self.is_processing = processing
+            if self._active_stream is not None:
+                if processing:
+                    self._active_stream.suspend()
+                else:
+                    self._active_stream.resume()
+
+    def _finish_processing(self):
+        self.set_processing(False)
+        if self.state_callback:
+            self.state_callback(self._resting_state())
+
+    def process_once(self, stream) -> bool:
+        """Capture and transcribe one phrase, returning whether it was queued."""
+        if not self._capture_enabled():
+            self._finish_processing()
+            return False
+
+        def activity_changed(active: bool):
+            if active and self.state_callback:
+                self.state_callback(VoiceState.LISTENING)
+
+        capture = stream.capture_phrase(
+            threshold=self.vad_threshold,
+            silence_limit=self.vad_silence_limit,
+            verbose=self.verbose,
+            stop_check=lambda: not self._capture_enabled() or self.is_processing,
+            ignore_check=self._input_suppressed,
+            volume_callback=self.volume_callback,
+            activity_callback=activity_changed,
+        )
+        if not capture.accepted or not self._capture_enabled():
+            self._finish_processing()
+            return False
+
+        self.set_processing(True)
+        if self.state_callback:
+            self.state_callback(VoiceState.TRANSCRIBING)
+        if self.verbose:
+            logger.info(f"Captured phrase: {len(capture.chunks)} frames")
+
+        try:
+            text = self.stt_provider.transcribe_stream(iter(capture.chunks)).strip()
+        except Exception:
+            self._finish_processing()
+            raise
+
+        if not self._capture_enabled():
+            self._finish_processing()
+            return False
+        if not _is_valid_transcript(text):
+            if text:
+                logger.debug("Ignored probable non-speech transcript: {!r}", text)
+            self._finish_processing()
+            return False
+
+        self.stt_queue.put(text)
+        return True
+
     def run(self):
         while not self.should_exit:
-            if not self.is_listening:
-                # Wait until we are told to listen or exit
+            if not self._capture_enabled():
                 self._toggle_event.wait()
                 self._toggle_event.clear()
                 continue
@@ -92,58 +196,25 @@ class VoiceInputThread(threading.Thread):
                 break
 
             try:
+                self.load_model()
+                if not self._capture_enabled():
+                    continue
                 from vsh.core.audio import MicStream, no_stderr
 
                 with no_stderr(), MicStream(device_index=self.device_index) as stream:
-                    # Inner loop for the active microphone session
-                    while self.is_listening and not self.should_exit:
-                        if self.is_processing:
-                            time.sleep(0.1)
-                            continue
-
-                        # Transition to actual phrase collection
-                        audio_chunks = list(
-                            stream.live_gen(
-                                threshold=self.vad_threshold,
-                                silence_limit=self.vad_silence_limit,
-                                verbose=self.verbose,
-                                stop_check=lambda: not self.is_listening or self.is_processing,
-                                volume_callback=self.volume_callback,
-                            )
-                        )
-
-                        # Ignore very short VAD bursts.  Keyboard clicks, bumps, and
-                        # transient fan noise can satisfy the energy gate, but are
-                        # not long enough to be a deliberate voice command.
-                        min_chunks = 8  # ~0.5s at the default 16 kHz/1024 chunk size
-                        if (
-                            len(audio_chunks) >= min_chunks
-                            and self.is_listening
-                            and getattr(stream, "last_capture_had_speech", False)
-                        ):
-                            # Log phrase capture
-                            if self.verbose:
-                                logger.info(f"Captured phrase: {len(audio_chunks)} chunks")
-
-                            # Transcribe the accumulated speech
-                            text = self.stt_provider.transcribe_stream(iter(audio_chunks))
-                            text = text.strip()
-
-                            if _is_silence_hallucination(text):
-                                logger.debug("Ignored probable silence hallucination: {!r}", text)
+                    self._set_active_stream(stream)
+                    try:
+                        while self._capture_enabled() and not self.should_exit:
+                            if self.is_processing:
+                                time.sleep(0.1)
                                 continue
 
-                            if text:
-                                # We have valid human speech! Lock the mic and show Processing.
-                                if getattr(self, "state_callback", None):
-                                    self.state_callback("transcribing", text=text)
-                                self.stt_queue.put(text)
-                            else:
-                                # False alarm (e.g. table bump, cough, fan noise).
-                                # Do nothing so the UI doesn't flicker, and let the mic naturally restart.
-                                pass
+                            self.process_once(stream)
+                    finally:
+                        self._set_active_stream(None)
 
             except Exception as e:
+                self._finish_processing()
                 logger.error(f"Voice thread error: {e}")
                 time.sleep(1)  # Prevent rapid crash loops
 

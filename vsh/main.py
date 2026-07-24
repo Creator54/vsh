@@ -169,9 +169,12 @@ def stt(
         from vsh.core.audio import MicStream, no_stderr
 
         with no_stderr(), MicStream(device_index=STATE["in"]) as s:
-            res = stt_provider.transcribe_stream(
-                s.live_gen(threshold=STATE["vad_thr"], silence_limit=STATE["vad_sil"], verbose=STATE["v"])
+            capture = s.capture_phrase(
+                threshold=STATE["vad_thr"],
+                silence_limit=STATE["vad_sil"],
+                verbose=STATE["v"],
             )
+            res = stt_provider.transcribe_stream(iter(capture.chunks)) if capture.accepted else ""
     if res:
         print(res)
 
