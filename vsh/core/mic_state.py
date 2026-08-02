@@ -113,6 +113,11 @@ class PipeWireMicMonitor(threading.Thread):
         self._stop_event.set()
         process = self._process
         if process and process.poll() is None:
+            try:
+                if process.stdout:
+                    process.stdout.close()
+            except OSError:
+                pass
             process.terminate()
 
     def run(self):

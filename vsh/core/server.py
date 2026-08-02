@@ -74,8 +74,19 @@ def make_handler(shell):
     return Handler
 
 
-def serve(shell, host="127.0.0.1", port=8770):
-    srv = ThreadingHTTPServer((host, port), make_handler(shell))
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    return srv
+from loguru import logger
+
+
+def serve(shell, host="127.0.0.1", port=8770, max_attempts=10):
+    for current_port in range(port, port + max_attempts):
+        try:
+            srv = ThreadingHTTPServer((host, current_port), make_handler(shell))
+            t = threading.Thread(target=srv.serve_forever, daemon=True)
+            t.start()
+            logger.debug(f"VSH HTTP tool server bound to {host}:{current_port}")
+            return srv
+        except OSError as e:
+            logger.debug(f"Port {current_port} busy ({e}), trying next...")
+            continue
+    logger.warning("Could not bind VSH HTTP tool server: all ports in range busy.")
+    return None
