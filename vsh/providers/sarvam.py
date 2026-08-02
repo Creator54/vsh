@@ -4,7 +4,7 @@ import numpy as np
 import requests
 from loguru import logger
 
-from vsh.providers.audio_format import decode_pcm16_wav, encode_pcm_wav, resample
+from vsh.providers.audio_format import decode_pcm16_wav_with_rate, encode_pcm_wav
 
 
 class SarvamSTTProvider:
@@ -46,6 +46,7 @@ class SarvamTTSProvider:
 
     def __init__(self, config):
         self.config = config
+        self.sample_rate = 24000
         self.api_key = self.config.api_key
         if not self.api_key:
             raise ValueError("Sarvam API key is required")
@@ -59,7 +60,7 @@ class SarvamTTSProvider:
             "target_language_code": "hi-IN",
             "speaker": getattr(self.config, "model", "priya") or "priya",
             "model": "bulbul:v3",
-            "speech_sample_rate": 16000,
+            "speech_sample_rate": self.sample_rate,
             "enable_preprocessing": True,
         }
 
@@ -73,7 +74,8 @@ class SarvamTTSProvider:
                 raise ValueError("No audio returned from Sarvam")
 
             audio_bytes = base64.b64decode(audios[0])
-            return resample(decode_pcm16_wav(audio_bytes), 16000, 44100)
+            samples, self.sample_rate = decode_pcm16_wav_with_rate(audio_bytes)
+            return samples
 
         except Exception as e:
             logger.error(f"Sarvam TTS failed: {e}")

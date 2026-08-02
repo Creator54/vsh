@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from vsh.core.mic_state import JsonStreamDecoder, PipeWireMicMonitor, PipeWireState
 
@@ -100,3 +100,22 @@ def test_missing_pipewire_monitor_reports_unknown_without_failing():
 
     assert not monitor.available
     assert states == [None]
+
+
+def test_pipewire_monitor_ignores_stdout_closed_during_stop():
+    states = []
+    with patch("vsh.core.mic_state.shutil.which", return_value="/bin/pw-dump"):
+        monitor = PipeWireMicMonitor(states.append)
+
+    class ClosingStream:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            monitor._stop_event.set()
+            raise ValueError("I/O operation on closed file")
+
+    process = MagicMock(stdout=ClosingStream())
+    process.poll.return_value = 0
+    with patch("vsh.core.mic_state.subprocess.Popen", return_value=process):
+        monitor.run()

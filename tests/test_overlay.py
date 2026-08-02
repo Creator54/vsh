@@ -540,6 +540,20 @@ class OverlayTests(unittest.TestCase):
             stdout.buffer.write.side_effect = BrokenPipeError
             shell._restore_terminal()
 
+    def test_exec_command_uses_completion_marker_and_real_exit_code(self):
+        shell = self._make_shell("none")
+        shell.master_fd = 7
+
+        def write_response(_fd, payload):
+            self.assertIn(b"__VSH_START_fixed__", payload)
+            shell._cap_buf.extend(b"echoed commands\r\n__VSH_START_fixed__\r\nhello\r\n__VSH_END_fixed__:7\r\nprompt")
+
+        with patch("secrets.token_hex", return_value="fixed"), patch("os.write", side_effect=write_response):
+            output, exit_code = shell.exec_command("printf hello")
+
+        self.assertEqual(output, "hello")
+        self.assertEqual(exit_code, 7)
+
 
 class TestHeadlessImport(unittest.TestCase):
     def test_main_imports_without_inquirerpy(self):

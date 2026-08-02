@@ -4,7 +4,7 @@ import numpy as np
 from loguru import logger
 
 from vsh.core.config import ProviderConfig
-from vsh.providers.audio_format import decode_audio_to_pcm16, encode_pcm_wav
+from vsh.providers.audio_format import decode_audio_to_pcm16_with_rate, encode_pcm_wav
 
 
 class HttpSTTProvider:
@@ -46,13 +46,13 @@ class HttpSTTProvider:
                             "language": "en",
                         }
                     )
-                response = requests.post(self.config.endpoint, headers=headers, files=files, data=data)
+                response = requests.post(self.config.endpoint, headers=headers, files=files, data=data, timeout=15)
             else:
                 import base64
 
                 headers["Content-Type"] = "application/json"
                 payload = {"audio": base64.b64encode(wav_data).decode("utf-8"), "model": self.model}
-                response = requests.post(self.config.endpoint, headers=headers, json=payload)
+                response = requests.post(self.config.endpoint, headers=headers, json=payload, timeout=15)
 
             response.raise_for_status()
             resp_json = response.json()
@@ -83,6 +83,7 @@ class HttpTTSProvider:
         self.api_key = self.config.api_key
         self.format = getattr(self.config, "format", "openai_tts")
         self.model = getattr(self.config, "model", "tts-1")
+        self.sample_rate = 44100
 
     def synthesize(self, text: str) -> np.ndarray:
         logger.debug(f"Synthesizing text via HTTP TTS ({self.format}): {text}")
@@ -105,11 +106,12 @@ class HttpTTSProvider:
         import requests
 
         try:
-            response = requests.post(self.config.endpoint, headers=headers, json=payload)
+            response = requests.post(self.config.endpoint, headers=headers, json=payload, timeout=15)
             response.raise_for_status()
             audio_bytes = response.content
 
-            return decode_audio_to_pcm16(audio_bytes)
+            samples, self.sample_rate = decode_audio_to_pcm16_with_rate(audio_bytes)
+            return samples
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP TTS request failed: {e}")
             if hasattr(e, "response") and e.response is not None:

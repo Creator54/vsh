@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import sys
 import tomllib
@@ -104,8 +105,6 @@ def get_default_rc(shell_path: str) -> str:
 
 
 def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: bool) -> bool:
-    import re
-
     rc_path = Path(rc_file).expanduser()
     rc_name = os.path.basename(rc_file).lower()
     is_zsh = "zsh" in rc_name
@@ -135,9 +134,13 @@ def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: b
 
     if set_default:
         if is_fish:
-            append_cmd += "if not set -q VSH_ACTIVE; and isatty 1\n    exec vsh\nend\n"
+            append_cmd += (
+                'if isatty 1; and begin; not set -q VSH_ACTIVE_TTY; or test "$VSH_ACTIVE_TTY" != (tty); end\n'
+                "    exec vsh\n"
+                "end\n"
+            )
         else:
-            append_cmd += 'if [ -z "$VSH_ACTIVE" ] && [ -t 1 ]; then\n    exec vsh\nfi\n'
+            append_cmd += 'if [ -t 1 ] && [ "${VSH_ACTIVE_TTY:-}" != "$(tty)" ]; then\n    exec vsh\nfi\n'
 
     if not append_cmd:
         return True
@@ -173,7 +176,35 @@ def _toml_value(value) -> str:
         return "true" if value else "false"
     if isinstance(value, list | tuple):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if value is None:
+        raise TypeError("TOML does not support null values")
     return json.dumps(value)
+
+
+def _toml_key(key: str) -> str:
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
+
+
+def _dump_toml(data: dict) -> str:
+    """Serialize the simple tables and scalar values used by VSH config."""
+    lines: list[str] = []
+
+    def emit_table(path: tuple[str, ...], table: dict) -> None:
+        if path:
+            if lines:
+                lines.append("")
+            lines.append("[" + ".".join(_toml_key(part) for part in path) + "]")
+
+        for key, value in table.items():
+            if not isinstance(value, dict) and value is not None:
+                lines.append(f"{_toml_key(str(key))} = {_toml_value(value)}")
+
+        for key, value in table.items():
+            if isinstance(value, dict):
+                emit_table((*path, str(key)), value)
+
+    emit_table((), data)
+    return "\n".join(lines) + "\n"
 
 
 def update_keybind_config(config_path: Path, keybind_data: dict) -> None:
@@ -347,7 +378,6 @@ def interactive_setup(section: str | None = None) -> None:
         if stt_provider == "vosk":
             sys.stdout.write("\nFetching official Vosk model list...\n")
             sys.stdout.flush()
-            import json
             import urllib.request
 
             try:
@@ -497,101 +527,77 @@ def interactive_setup(section: str | None = None) -> None:
             rc_file = inquirer.text(message="Shell config file to update:", default=default_rc).execute()
             update_shell_rc_bind(rc_file, keybind_data if add_shortcut else None, set_default)
 
-    lines = [
-        "[shell]",
-        f"inner_shell = {json.dumps(inner_shell)}",
-        f"voice_on_start = {str(voice_on_start).lower()}",
-        f"auto_submit = {str(auto_submit).lower()}",
-        "",
-        "[keybinds]",
-        f"toggle_listen = {json.dumps(keybind_data['name'])}",
-        f"toggle_listen_triggers = {json.dumps(keybind_data['triggers'])}",
-        "",
-        "[stt]",
-    ]
+    def table(name: str) -> dict:
+        value = existing.get(name)
+        if not isinstance(value, dict):
+            value = {}
+            existing[name] = value
+        return value
 
+    table("shell").update(
+        {
+            "inner_shell": inner_shell,
+            "voice_on_start": voice_on_start,
+            "auto_submit": auto_submit,
+        }
+    )
+    table("keybinds").update(
+        {
+            "toggle_listen": keybind_data["name"],
+            "toggle_listen_triggers": keybind_data["triggers"],
+        }
+    )
+
+    stt = table("stt")
+    stt["provider"] = "custom_http" if stt_provider == "groq" else stt_provider
     if stt_provider in ("custom_http", "groq"):
-        lines.extend(
-            [
-                'provider = "custom_http"',
-                'type = "http"',
-                f"endpoint = {json.dumps(stt_http['endpoint'])}",
-                f"api_key_env = {json.dumps(stt_http['api_key_env'])}",
-                f"format = {json.dumps(stt_http['format'])}",
-                f"model = {json.dumps(stt_http['model'])}",
-            ]
-        )
+        stt.update({"type": "http", **stt_http})
     elif stt_provider == "sarvam":
-        lines.extend(['provider = "sarvam"', f"api_key_env = {json.dumps(stt_http['api_key_env'])}"])
-    elif stt_provider == "vosk":
-        lines.extend(['provider = "vosk"'])
-        if vosk_model_name:
-            lines.extend([f"model = {json.dumps(vosk_model_name)}", f"url = {json.dumps(vosk_model_url)}"])
+        stt["api_key_env"] = stt_http["api_key_env"]
+    elif stt_provider == "vosk" and vosk_model_name:
+        stt.update({"model": vosk_model_name, "url": vosk_model_url})
+    if device_index is None:
+        stt.pop("device_index", None)
     else:
-        lines.extend([f'provider = "{stt_provider}"'])
+        stt["device_index"] = device_index
 
-    if device_index is not None:
-        lines.append(f"device_index = {device_index}")
-
-    lines.extend(["", "[tts]"])
+    tts = table("tts")
+    tts["provider"] = tts_provider
     if tts_provider == "custom_http":
-        lines.extend(
-            [
-                'provider = "custom_http"',
-                'type = "http"',
-                f"endpoint = {json.dumps(tts_http['endpoint'])}",
-                f"api_key_env = {json.dumps(tts_http['api_key_env'])}",
-                f"format = {json.dumps(tts_http['format'])}",
-                f"model = {json.dumps(tts_http['model'])}",
-            ]
-        )
+        tts.update({"type": "http", **tts_http})
     elif tts_provider == "sarvam":
-        lines.extend(['provider = "sarvam"', f"api_key_env = {json.dumps(tts_http['api_key_env'])}"])
+        tts["api_key_env"] = tts_http["api_key_env"]
         if tts_http.get("model"):
-            lines.extend([f"model = {json.dumps(tts_http['model'])}"])
-    elif tts_provider == "polly":
-        lines.extend(['provider = "polly"'])
-        if tts_http.get("model"):
-            lines.extend([f"model = {json.dumps(tts_http['model'])}"])
-    else:
-        lines.extend([f'provider = "{tts_provider}"'])
+            tts["model"] = tts_http["model"]
+    elif tts_provider == "polly" and tts_http.get("model"):
+        tts["model"] = tts_http["model"]
 
-    if thinker and thinker != "none":
-        lines.extend(["", "[llm]", f'output_mode = "{output_mode}"'])
-        if thinker == "custom_http":
-            lines.extend(
-                [
-                    'provider = "custom_http"',
-                    "",
-                    "[llm.custom_http]",
-                    'type = "http"',
-                    f"endpoint = {json.dumps(endpoint)}",
-                    f"api_key_env = {json.dumps(api_key_env)}",
-                    'format = "openai"',
-                    f"model = {json.dumps(model)}",
-                ]
-            )
-        elif thinker == "custom_cli":
-            lines.extend(
-                ['provider = "custom_cli"', "", "[llm.custom_cli]", 'type = "cli"', f"command = {json.dumps(cli_cmd)}"]
-            )
-        else:
-            lines.extend([f'provider = "{thinker}"'])
-            if model:
-                lines.extend([f"model = {json.dumps(model)}"])
-
-    if "llm" in existing:
-        for k, v in existing["llm"].items():
-            if isinstance(v, dict) and k not in ("custom_http", "custom_cli"):
-                lines.extend(["", f"[llm.{k}]"])
-                for sub_k, sub_v in v.items():
-                    if isinstance(sub_v, bool):
-                        lines.append(f"{sub_k} = {str(sub_v).lower()}")
-                    elif isinstance(sub_v, int):
-                        lines.append(f"{sub_k} = {sub_v}")
-                    else:
-                        lines.append(f"{sub_k} = {json.dumps(sub_v)}")
+    llm = table("llm")
+    llm["provider"] = thinker
+    llm["output_mode"] = output_mode
+    if thinker == "custom_http":
+        profile = llm.get("custom_http")
+        if not isinstance(profile, dict):
+            profile = {}
+            llm["custom_http"] = profile
+        profile.update(
+            {
+                "type": "http",
+                "endpoint": endpoint,
+                "api_key_env": api_key_env,
+                "format": "openai",
+                "model": model,
+            }
+        )
+    elif thinker == "custom_cli":
+        profile = llm.get("custom_cli")
+        if not isinstance(profile, dict):
+            profile = {}
+            llm["custom_cli"] = profile
+        profile.update({"type": "cli", "command": cli_cmd})
+    elif thinker == "ollama" and model:
+        llm["model"] = model
 
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text("\n".join(lines) + "\n")
+    cfg_path.write_text(_dump_toml(existing))
     sys.stdout.write(f"\nConfiguration successfully written to {cfg_path}\n")

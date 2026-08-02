@@ -29,7 +29,7 @@ nix profile install github:creator54/vsh
   - `--voice`: start listening immediately.
   - `--verbose`: show logs.
   - `--echo`: return recognized speech without an AI.
-  - `--serve --port 8770`: expose the live shell on a local-only web server.
+  - `--serve --port 8770`: expose the live shell on an authenticated, local-only web server.
 - `vsh setup`: configure the AI provider, microphone, and VSH keybind.
 - `vsh bind`: change the VSH toggle keybind.
 - `vsh stt [--file <audio.wav>]`: transcribe the microphone or a WAV file.
@@ -55,6 +55,9 @@ nix profile install github:creator54/vsh
 - Visual: `VSH_OVERLAY` (`auto`, `kitty`, or `none`).
 - Voice command: `VSH_VOICE_HANDLER='command {}'`.
 - Fish replies: `VSH_RESPONSE_BRIDGE=fish-signal`.
+- HTTP bridge: `VSH_SERVER_TOKEN` sets the bearer token for `--serve`.
+  - When unset, VSH generates and prints a per-instance token with the bound address.
+  - Send it as `Authorization: Bearer <token>` on every bridge request.
 
 ## Keybinds
 

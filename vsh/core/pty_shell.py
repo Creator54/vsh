@@ -139,7 +139,7 @@ class PtyShell:
             or shutil.which("sh")
             or "/bin/sh"
         )
-        self.inner_shell_args = getattr(config.shell, "inner_shell_args", [self.inner_shell])
+        self.inner_shell_args = config.shell.inner_shell_args or [self.inner_shell]
 
         self.master_fd = None
         self.stt_queue = queue.Queue()
@@ -166,6 +166,8 @@ class PtyShell:
         self.shell_pid = None
         self.shell_state = "starting"
         self._exec_lock = threading.Lock()
+        self._cap_lock = threading.Lock()
+        self._cap_event = threading.Event()
         self._cap_buf = None
 
         self.output_history = collections.deque(maxlen=2000)
@@ -201,11 +203,10 @@ class PtyShell:
     def _speak(self, text: str) -> bool:
         """Play the reply before running its command."""
         try:
-            wav = self.tts_provider.synthesize(text)
-            data = (wav * 32767 * 0.9).astype("int16").tobytes()
-            from vsh.core.audio import play_audio
+            from vsh.core.audio import play_audio, synthesize_pcm16
 
-            play_audio(data, 44100, device_index=self.config.tts.device_index)
+            data, rate = synthesize_pcm16(self.tts_provider, text)
+            play_audio(data, rate, device_index=self.config.tts.device_index)
             return True
         except Exception as e:
             logger.error(f"TTS Error: {e}")
@@ -323,7 +324,7 @@ class PtyShell:
     def _notify(self, msg: str, color="36"):
         """Verbose notification for startup and toggle diagnostics."""
         if self.verbose:
-            sys.stdout.buffer.write(f"\r\n\033[{color}m[vsh]\033[0m {msg}\r\n".encode())
+            sys.stdout.buffer.write(f"\r\n\033[{color}m◆\033[0m {msg}\r\n".encode())
             sys.stdout.buffer.flush()
 
     def _toggle_listening(self):
@@ -331,7 +332,11 @@ class PtyShell:
         if enabled:
             self.voice_thread.suppress_input(0.6)
         if self.verbose:
-            m = f"LISTENING (Press {self.config.keybinds.toggle_listen} or Ctrl+G to pause)" if enabled else "STOPPED"
+            m = (
+                f"Listening · press {self.config.keybinds.toggle_listen} or Ctrl+G to pause"
+                if enabled
+                else "Listening paused"
+            )
             c = "1;35" if enabled else "36"
             self._notify(m, color=c)
         if enabled:
@@ -397,15 +402,15 @@ class PtyShell:
 
     def run(self):
         """Start the shell, background workers, and input/output loop."""
-        os.environ["VSH_ACTIVE"] = "1"
-
         pid, self.master_fd = pty.fork()
 
         if pid == 0:
             try:
+                os.environ["VSH_ACTIVE"] = "1"
+                os.environ["VSH_ACTIVE_TTY"] = os.ttyname(sys.stdin.fileno())
                 os.execv(self.inner_shell, self.inner_shell_args)
             except Exception as e:
-                sys.stderr.write(f"[vsh] Failed to start shell: {self.inner_shell}: {e}\n")
+                sys.stderr.write(f"\033[31m✗\033[0m Failed to start {self.inner_shell} · {e}\n")
                 os._exit(1)
         else:
             self.shell_pid = pid
@@ -483,54 +488,52 @@ class PtyShell:
 
         Raises RuntimeError when the shell is already running another command.
         """
+        if not command.strip():
+            raise ValueError("command must be a non-empty string")
         if not self._exec_lock.acquire(blocking=False):
             raise RuntimeError("shell busy")
         try:
             self.shell_state = "busy"
-            self._cap_buf = bytearray()
-
-            baseline_tail = ""
-            if self.output_history:
-                recent_history = list(self.output_history)[-50:]
-                raw_hist = b"".join(recent_history)
-                clean_hist = _clean_output(raw_hist)
-                hist_lines = [line for line in clean_hist.split("\n") if line.strip()]
-                if hist_lines:
-                    baseline_tail = hist_lines[-1].strip()
+            with self._cap_lock:
+                self._cap_buf = bytearray()
+            self._cap_event.clear()
 
             if self.master_fd is None:
                 raise RuntimeError("PTY shell master_fd is not initialized")
 
-            os.write(self.master_fd, command.encode() + b"\n")
+            marker_id = secrets.token_hex(16)
+            start_marker = f"__VSH_START_{marker_id}__"
+            end_marker = f"__VSH_END_{marker_id}__"
+            status = "$status" if self.shell_name.lower().rsplit("-", 1)[-1] == "fish" else '"$?"'
+            payload = f"printf '\\n{start_marker}\\n'\n{command.rstrip()}\nprintf '\\n{end_marker}:%s\\n' {status}\n"
+            os.write(self.master_fd, payload.encode())
 
-            start = time.time()
-            last_len = 0
-            silence_start = time.time()
-            while time.time() - start < timeout:
-                time.sleep(0.1)
-                curr_len = len(self._cap_buf)
-                if curr_len != last_len:
-                    silence_start = time.time()
-                    last_len = curr_len
-                elif time.time() - silence_start > 0.5:
+            deadline = time.monotonic() + timeout
+            end_match = None
+            clean_output = ""
+            while time.monotonic() < deadline:
+                with self._cap_lock:
+                    raw = bytes(self._cap_buf or b"")
+                clean_output = _clean_output(raw)
+                end_match = re.search(rf"(?:^|\n){re.escape(end_marker)}:(\d+)\r?(?:\n|$)", clean_output)
+                if end_match:
                     break
+                self._cap_event.wait(min(0.1, max(0.0, deadline - time.monotonic())))
+                self._cap_event.clear()
 
-            raw = bytes(self._cap_buf)
-            nl = raw.find(b"\n")
-            body = raw[nl + 1 :] if nl != -1 else raw
-            self.shell_state = "idle"
-            clean_out = _clean_output(body)
+            if end_match is None:
+                raise TimeoutError(f"command did not complete within {timeout:g} seconds")
 
-            lines = clean_out.split("\n")
-            while lines and not lines[-1].strip():
-                lines.pop()
+            start_match = re.search(rf"(?:^|\n){re.escape(start_marker)}\r?\n", clean_output)
+            if start_match is None or start_match.end() > end_match.start():
+                raise RuntimeError("command output start marker was not received")
 
-            if lines and baseline_tail and lines[-1].strip() == baseline_tail:
-                lines.pop()
-
-            return "\n".join(lines).strip(), 0
+            output = clean_output[start_match.end() : end_match.start()].replace("\r", "").strip()
+            return output, int(end_match.group(1))
         finally:
-            self._cap_buf = None
+            self.shell_state = "idle"
+            with self._cap_lock:
+                self._cap_buf = None
             self._exec_lock.release()
 
     def _io_loop(self):
@@ -591,8 +594,10 @@ class PtyShell:
                     break
 
                 self.output_history.append(data)
-                if self._cap_buf is not None:
-                    self._cap_buf.extend(data)
+                with self._cap_lock:
+                    if self._cap_buf is not None:
+                        self._cap_buf.extend(data)
+                        self._cap_event.set()
                 self._track_pty_controls(data)
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()

@@ -1,13 +1,14 @@
 import numpy as np
 from loguru import logger
 
-from vsh.providers.audio_format import decode_pcm16, resample
+from vsh.providers.audio_format import decode_pcm16
 
 
 class AwsPollyTTSProvider:
     """AWS Polly Text-to-Speech provider."""
 
     def __init__(self, voice="Matthew"):
+        self.sample_rate = 16000
         try:
             import boto3
 
@@ -33,7 +34,7 @@ class AwsPollyTTSProvider:
 
             if "AudioStream" in response:
                 audio_bytes = response["AudioStream"].read()
-                return resample(decode_pcm16(audio_bytes), 16000, 44100)
+                return decode_pcm16(audio_bytes)
             logger.error("No AudioStream in Polly response")
             return np.zeros(1, dtype=np.float32)
 

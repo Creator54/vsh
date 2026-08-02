@@ -1,9 +1,22 @@
 import queue
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 
-from vsh.core.audio import MicStream, detect_phrase
+from vsh.core.audio import MicStream, detect_phrase, synthesize_pcm16
+
+
+def test_synthesize_pcm16_preserves_provider_sample_rate():
+    provider = SimpleNamespace(
+        sample_rate=24000,
+        synthesize=lambda _text: np.array([-1.0, 0.0, 1.0], dtype=np.float32),
+    )
+
+    data, rate = synthesize_pcm16(provider, "hello")
+
+    assert rate == 24000
+    np.testing.assert_array_equal(np.frombuffer(data, dtype=np.int16), [-29490, 0, 29490])
 
 
 class SequenceVad:

@@ -8,6 +8,7 @@ class SupertonicTTSProvider:
 
     def __init__(self, voice="F1"):
         self.voice = voice
+        self.sample_rate = 44100
         self.engine = None
         self.voice_style = None
         self._lock = threading.Lock()

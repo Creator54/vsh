@@ -15,7 +15,42 @@ from vsh.core.setup import (
 )
 from vsh.providers import resolve_stt, resolve_thinker, resolve_tts
 
+
+def _restore_nix_environment():
+    variables = (
+        "PATH",
+        "VIRTUAL_ENV",
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_PYTHON",
+        "C_INCLUDE_PATH",
+        "LIBRARY_PATH",
+        "LD_LIBRARY_PATH",
+    )
+    for variable in variables:
+        original = os.environ.pop(f"VSH_ORIGINAL_{variable}", "")
+        if original:
+            os.environ[variable] = original
+        else:
+            os.environ.pop(variable, None)
+
+
+if os.environ.pop("VSH_NIX_WRAPPER", None):
+    # The wrapper needs these while uv builds/launches VSH, but they must not
+    # leak into the user's interactive shell or unrelated uv projects.
+    _restore_nix_environment()
+
 VERBOSE = False
+
+
+def _is_vsh_active_on_this_terminal() -> bool:
+    active_tty = os.environ.get("VSH_ACTIVE_TTY")
+    if not active_tty:
+        return False
+    try:
+        return active_tty == os.ttyname(sys.stdin.fileno())
+    except OSError:
+        return False
+
 
 # Programs invoke $SHELL with `-c`, so handle it before Typer parses the arguments.
 if len(sys.argv) >= 3 and sys.argv[1] == "-c":
@@ -39,7 +74,7 @@ class NoSuchCommandShowsHelp(typer.core.TyperGroup):
         if command is None:
             sys.stderr.write(f"Unknown command: '{cmd_name}'\n")
             sys.stderr.write("\n" + ctx.get_help() + "\n")
-            sys.exit(0)
+            ctx.exit(2)
         return command
 
 
@@ -47,7 +82,21 @@ def setup_logger(v: bool):
     global VERBOSE
     VERBOSE = v
     logger.remove()
-    logger.add(sys.stderr, level="INFO" if v else "ERROR", format="{message}")
+    for level, icon, color in (
+        ("DEBUG", "·", "<dim>"),
+        ("INFO", "◆", "<cyan>"),
+        ("SUCCESS", "✓", "<green>"),
+        ("WARNING", "!", "<yellow>"),
+        ("ERROR", "✗", "<red>"),
+        ("CRITICAL", "✗", "<RED><bold>"),
+    ):
+        logger.level(level, icon=icon, color=color)
+    logger.add(
+        sys.stderr,
+        level="INFO" if v else "SUCCESS",
+        format="<level>{level.icon} {message}</level>",
+        colorize=sys.stderr.isatty(),
+    )
     try:
         from vosk import SetLogLevel
 
@@ -79,8 +128,8 @@ def main(
 ):
     """Start an interactive terminal controlled by voice."""
     setup_logger(v)
-    if os.environ.get("VSH_ACTIVE"):
-        sys.stderr.write("[vsh] Already running inside vsh. Exiting.\n")
+    if _is_vsh_active_on_this_terminal():
+        logger.warning("Already running inside VSH on this terminal")
         raise typer.Exit(0)
     if ctx.invoked_subcommand is not None:
         return
@@ -107,14 +156,12 @@ def main(
         try:
             thinker = resolve_thinker(config.llm.provider, config)
         except Exception as e:
-            sys.stderr.write(f"[vsh] Failed to load AI provider '{config.llm.provider}': {e}\n")
             logger.error(f"Failed to load AI provider '{config.llm.provider}': {e}")
 
     tts_provider = None
     try:
         tts_provider = resolve_tts(config)
     except Exception as e:
-        sys.stderr.write(f"[vsh] Failed to load TTS '{config.tts.provider}': {e}\n")
         logger.error(f"Failed to load TTS '{config.tts.provider}': {e}")
 
     if config.tts.provider not in ("", "none") and not tts_provider:
@@ -132,7 +179,12 @@ def main(
         try:
             from vsh.core.server import serve as serve_http
 
-            serve_http(pty_shell, port=port)
+            http_server = serve_http(pty_shell, port=port)
+            if http_server is not None:
+                host, actual_port = http_server.server_address
+                logger.success(
+                    f"HTTP bridge · http://{host}:{actual_port} · Authorization: Bearer {http_server.auth_token}"
+                )
         except Exception as e:
             logger.error(f"Shell bridge failed: {e}")
 
@@ -164,8 +216,7 @@ def stt(
         res = stt_provider.transcribe_stream([data], rate=rate)
     else:
         if VERBOSE:
-            sys.stderr.write("LISTENING\n")
-            sys.stderr.flush()
+            logger.info("Listening")
         from vsh.core.audio import MicStream, no_stderr
 
         with no_stderr(), MicStream(device_index=config.stt.device_index) as s:
@@ -202,20 +253,19 @@ def tts(
             tts_provider = SupertonicTTSProvider(voice="F1")
 
     if VERBOSE:
-        sys.stderr.write("SPEAKING\n")
-        sys.stderr.flush()
-    wav = tts_provider.synthesize(text)
-    data = (wav * 32767 * 0.9).astype("int16").tobytes()
-    from vsh.core.audio import play_audio, save_audio
+        logger.info("Speaking")
+    from vsh.core.audio import play_audio, save_audio, synthesize_pcm16
+
+    data, rate = synthesize_pcm16(tts_provider, text)
 
     if save:
-        save_audio(save, data, 44100)
-        logger.info(f"Saved: {save}")
+        save_audio(save, data, rate)
+        logger.success(f"Saved · {save}")
     elif stream:
         sys.stdout.buffer.write(data)
         sys.stdout.buffer.flush()
     else:
-        play_audio(data, 44100, device_index=config.tts.device_index)
+        play_audio(data, rate, device_index=config.tts.device_index)
 
 
 @app.command()

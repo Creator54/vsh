@@ -218,6 +218,13 @@ def save_audio(p: str, data: bytes, rate: int, width: int = 2):
         f.writeframes(data)
 
 
+def synthesize_pcm16(provider, text: str) -> tuple[bytes, int]:
+    """Synthesize normalized samples while preserving the provider's rate."""
+    samples = provider.synthesize(text)
+    data = (samples * 32767 * 0.9).astype("int16").tobytes()
+    return data, int(getattr(provider, "sample_rate", 44100))
+
+
 class MicStream:
     """Microphone audio stream using PyAudio."""
 

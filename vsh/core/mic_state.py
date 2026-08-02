@@ -147,8 +147,9 @@ class PipeWireMicMonitor(threading.Thread):
                         if current != last_state:
                             last_state = current
                             self._callback(current)
-            except OSError as error:
-                logger.debug("PipeWire microphone monitor unavailable: {}", error)
+            except (OSError, ValueError) as error:
+                if not self._stop_event.is_set():
+                    logger.debug("PipeWire microphone monitor unavailable: {}", error)
             finally:
                 process = self._process
                 self._process = None

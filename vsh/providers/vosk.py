@@ -37,14 +37,9 @@ class VoskSTTProvider:
         os.makedirs(os.path.dirname(model_path), exist_ok=True)
         logger.info(f"Downloading model {self.model_name}...")
         tmp_zip = model_path + ".tmp.zip"
-        import ssl
-        import sys
         import urllib.request
 
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(model_url, context=ctx) as r, open(tmp_zip, "wb") as f:
+        with urllib.request.urlopen(model_url, timeout=30) as r, open(tmp_zip, "wb") as f:
             total_size = int(r.headers.get("Content-Length", 0))
             downloaded = 0
             chunk_size = 128 * 1024
