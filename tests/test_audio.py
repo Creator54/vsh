@@ -251,3 +251,27 @@ def test_suspended_stream_drops_callback_audio_and_clears_stale_frames():
     stream._callback(b"voice", 0, None, None)
 
     assert stream._queue.get_nowait() == b"voice"
+
+
+def test_mic_stream_falls_back_to_default_device_on_open_failure():
+    from unittest.mock import MagicMock, patch
+
+    stream = MicStream.__new__(MicStream)
+    stream.rate, stream.chunk, stream.device_index = 16000, 1024, 99
+    stream._audio = MagicMock()
+    stream._queue = MagicMock()
+    stream._frame_carry = b""
+    stream._noise_energies = []
+    stream._capture_lock = MagicMock()
+    stream._suspended = MagicMock()
+
+    mock_open_stream = MagicMock()
+    # First call with device_index=99 raises OSError, second call with device_index=None succeeds
+    stream._audio.open.side_effect = [OSError("Invalid device index"), mock_open_stream]
+
+    res = stream.__enter__()
+
+    assert res is stream
+    assert stream._audio.open.call_count == 2
+    assert stream._audio.open.call_args_list[0].kwargs["input_device_index"] == 99
+    assert stream._audio.open.call_args_list[1].kwargs["input_device_index"] is None

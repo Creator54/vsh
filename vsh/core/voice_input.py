@@ -106,6 +106,9 @@ class VoiceInputThread(threading.Thread):
         """Signal the thread to shut down completely."""
         self.should_exit = True
         self.is_listening = False
+        with self._processing_lock:
+            if self._active_stream is not None:
+                self._active_stream.resume()
         self._toggle_event.set()
 
     def _capture_enabled(self) -> bool:

@@ -177,19 +177,23 @@ def detect_phrase(
     return finish("eof")
 
 
+_STDERR_LOCK = threading.RLock()
+
+
 @contextlib.contextmanager
 def no_stderr():
-    """Silence low-level audio library warnings."""
-    fd = sys.stderr.fileno()
-    with os.fdopen(os.dup(fd), "w") as saved:
-        with open(os.devnull, "w") as devnull:
-            sys.stderr.flush()
-            os.dup2(devnull.fileno(), fd)
-            try:
-                yield
-            finally:
+    """Silence low-level audio library warnings cleanly."""
+    with _STDERR_LOCK:
+        fd = sys.stderr.fileno()
+        with os.fdopen(os.dup(fd), "w") as saved:
+            with open(os.devnull, "w") as devnull:
                 sys.stderr.flush()
-                os.dup2(saved.fileno(), fd)
+                os.dup2(devnull.fileno(), fd)
+                try:
+                    yield
+                finally:
+                    sys.stderr.flush()
+                    os.dup2(saved.fileno(), fd)
 
 
 def play_audio(data: bytes, rate: int, width: int = 2, device_index=None):
@@ -230,15 +234,32 @@ class MicStream:
 
     def __enter__(self):
         with no_stderr():
-            self._stream = self._audio.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=self.rate,
-                input=True,
-                input_device_index=self.device_index,
-                frames_per_buffer=self.chunk,
-                stream_callback=self._callback,
-            )
+            try:
+                self._stream = self._audio.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=self.rate,
+                    input=True,
+                    input_device_index=self.device_index,
+                    frames_per_buffer=self.chunk,
+                    stream_callback=self._callback,
+                )
+            except Exception as e:
+                if self.device_index is not None:
+                    logger.warning(
+                        f"Failed to open audio device index {self.device_index}: {e}. Falling back to default device."
+                    )
+                    self._stream = self._audio.open(
+                        format=pyaudio.paInt16,
+                        channels=1,
+                        rate=self.rate,
+                        input=True,
+                        input_device_index=None,
+                        frames_per_buffer=self.chunk,
+                        stream_callback=self._callback,
+                    )
+                else:
+                    raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
