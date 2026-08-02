@@ -9,9 +9,42 @@ An interactive terminal controlled by voice, with local or cloud speech and AI p
 - Pick local, cloud, or custom HTTP speech providers.
 - Ignore steady background noise before transcription.
 
+## How it works
+
+```mermaid
+flowchart LR
+    User((User))
+    Voice[Voice input]
+    Recognition[Speech recognition]
+    Route{Transcript route}
+    Processor[Response processor]
+    Reply[Speech + command]
+    Speech[Speech output]
+    Session[VSH session]
+    Shell[Interactive shell]
+    Client[External client]
+    HTTP[HTTP interface]
+
+    User -->|keyboard input| Session
+    User -->|voice| Voice --> Recognition --> Route
+    Route -->|direct command| Session
+    Route -->|process| Processor --> Reply
+    Reply -->|speech| Speech --> User
+    Reply -->|command| Session
+    Client -->|request| HTTP
+    HTTP -->|shell operation| Session
+    Session -->|result| HTTP
+    HTTP -->|response| Client
+    Session -->|shell input| Shell
+    Shell -->|shell output| Session
+    Session -->|terminal output| User
+```
+
+Keyboard, voice, and HTTP commands all operate on the same live shell session.
+
 ## Installation
 
-Requires `portaudio` and `alsa-lib` (Linux).
+The Nix package includes its native audio dependencies. For uv installs, install PortAudio; Linux also requires ALSA development libraries.
 
 ```bash
 # uv
@@ -30,7 +63,7 @@ nix profile install github:creator54/vsh
   - `--verbose`: show logs.
   - `--echo`: return recognized speech without an AI.
   - `--serve --port 8770`: expose the live shell on an authenticated, local-only web server.
-- `vsh setup`: configure the AI provider, microphone, and VSH keybind.
+- `vsh setup`: configure the shell, speech and AI providers, microphone, and keybind.
 - `vsh bind`: change the VSH toggle keybind.
 - `vsh stt [--file <audio.wav>]`: transcribe the microphone or a WAV file.
 - `vsh tts "<text>" [--save <out.wav>] [--stream]`: speak or save text.
@@ -61,11 +94,6 @@ nix profile install github:creator54/vsh
 
 ## Keybinds
 
-- `Ctrl+]`: toggle VSH voice capture.
+- Press the configured keybind (default `Ctrl+\`), `Ctrl+G`, or `Ctrl+]` to toggle voice capture.
   - Off: remove the voice indicator and restore the normal cursor.
   - On: follow the system microphone's mute state (Linux/PipeWire).
-- Kitty may need explicit mappings for modified symbols:
-  - `Ctrl+,`: `map ctrl+, send_text all \x1b[44;5u`
-  - `Ctrl+Backspace`: `map ctrl+backspace send_text all \x1b[127;5u`
-- The terminal driver may reserve control keys such as `Ctrl+O` or `Ctrl+S`.
-  - Example: `stty discard undef` frees `Ctrl+O`.
