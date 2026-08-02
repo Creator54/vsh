@@ -366,11 +366,13 @@ def interactive_setup(section: str | None = None) -> None:
                     vosk_model_name = selected_m["name"]
                     vosk_model_url = selected_m["url"]
             except Exception as e:
-                sys.stderr.write(f"\nFailed to fetch models: {e}\nUsing default.\n")
-                vosk_model_name = get_val("stt", "model", default="vosk-model-en-in-0.5")
-                vosk_model_url = get_val(
-                    "stt", "url", default="https://alphacephei.com/vosk/models/vosk-model-en-in-0.5.zip"
-                )
+                sys.stderr.write(f"\nFailed to fetch official Vosk model list: {e}\n")
+                vosk_model_name = inquirer.text(
+                    message="Vosk Model Name:", default=get_val("stt", "model", default="")
+                ).execute()
+                vosk_model_url = inquirer.text(
+                    message="Vosk Model Download URL:", default=get_val("stt", "url", default="")
+                ).execute()
         elif stt_provider == "sarvam":
             stt_http["api_key_env"] = inquirer.text(
                 message="Sarvam API Key Env Var:", default=get_val("stt", "api_key_env", default="SARVAM_API_KEY")

@@ -72,6 +72,32 @@ class TestProviders(unittest.TestCase):
         expected = resample(pcm.astype(np.float32) / 32768.0, 16000, 44100)
         np.testing.assert_array_equal(result, expected)
 
+    def test_vosk_provider_requires_configured_model_name(self):
+        from vsh.providers.vosk import VoskSTTProvider
+
+        with self.assertRaises(ValueError) as ctx:
+            VoskSTTProvider(model_name="", model_url="")
+        self.assertIn("No Vosk model name configured", str(ctx.exception))
+
+    def test_vosk_provider_requires_url_when_model_path_missing(self):
+        from vsh.providers.vosk import VoskSTTProvider
+
+        with (
+            patch("os.path.exists", return_value=False),
+            self.assertRaises(ValueError) as ctx,
+        ):
+            VoskSTTProvider(model_name="nonexistent-model", model_url="")
+        self.assertIn("no download URL is configured", str(ctx.exception))
+
+    @patch("vsh.providers.vosk.Model")
+    def test_vosk_provider_loads_existing_local_model(self, mock_model_cls):
+        from vsh.providers.vosk import VoskSTTProvider
+
+        with patch("os.path.exists", return_value=True):
+            provider = VoskSTTProvider(model_name="installed-model")
+            self.assertEqual(provider.model_name, "installed-model")
+            mock_model_cls.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

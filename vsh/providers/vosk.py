@@ -13,55 +13,59 @@ from loguru import logger  # noqa: E402
 from vosk import KaldiRecognizer, Model  # noqa: E402
 
 
+# ponytail: minimal direct vosk model resolution without hardcoded model defaults
 class VoskSTTProvider:
     """Vosk Offline Speech-to-Text provider."""
 
-    DEFAULT_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-en-in-0.5.zip"
-    DEFAULT_MODEL_NAME = "vosk-model-en-in-0.5"
-
     def __init__(self, model_name: str = None, model_url: str = None):
-        self.model_name = model_name or self.DEFAULT_MODEL_NAME
-        self.model_url = model_url or self.DEFAULT_MODEL_URL
+        if not model_name:
+            raise ValueError("No Vosk model name configured. Run 'vsh setup' to select a model.")
+        self.model_name = model_name
+        self.model_url = model_url
+
         # Use XDG-compatible path so models work regardless of install method
         model_path = str(Path.home() / ".local" / "share" / "vsh" / "models" / self.model_name)
-
-        self._ensure_model(model_path, self.model_url)
+        if not os.path.exists(model_path):
+            if not self.model_url:
+                raise ValueError(
+                    f"Vosk model '{self.model_name}' is not installed at '{model_path}' and no download URL is configured."
+                )
+            self._ensure_model(model_path, self.model_url)
         self.model = Model(model_path)
 
     def _ensure_model(self, model_path: str, model_url: str):
-        if not os.path.exists(model_path):
-            os.makedirs(os.path.dirname(model_path), exist_ok=True)
-            logger.info(f"Downloading model {self.model_name}...")
-            tmp_zip = model_path + ".tmp.zip"
-            import ssl
-            import sys
-            import urllib.request
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
+        logger.info(f"Downloading model {self.model_name}...")
+        tmp_zip = model_path + ".tmp.zip"
+        import ssl
+        import sys
+        import urllib.request
 
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            with urllib.request.urlopen(model_url, context=ctx) as r, open(tmp_zip, "wb") as f:
-                total_size = int(r.headers.get("Content-Length", 0))
-                downloaded = 0
-                chunk_size = 128 * 1024
-                while True:
-                    chunk = r.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size:
-                        percent = int((downloaded / total_size) * 100)
-                        sys.stderr.write(
-                            f"\rDownloading model {self.model_name}... {percent}% ({downloaded / (1024 * 1024):.1f}MB / {total_size / (1024 * 1024):.1f}MB)"
-                        )
-                        sys.stderr.flush()
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(model_url, context=ctx) as r, open(tmp_zip, "wb") as f:
+            total_size = int(r.headers.get("Content-Length", 0))
+            downloaded = 0
+            chunk_size = 128 * 1024
+            while True:
+                chunk = r.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
                 if total_size:
-                    sys.stderr.write("\n")
-            logger.info("Extracting...")
-            shutil.unpack_archive(tmp_zip, os.path.dirname(model_path))
-            os.remove(tmp_zip)
-            logger.success("Model ready.")
+                    percent = int((downloaded / total_size) * 100)
+                    sys.stderr.write(
+                        f"\rDownloading model {self.model_name}... {percent}% ({downloaded / (1024 * 1024):.1f}MB / {total_size / (1024 * 1024):.1f}MB)"
+                    )
+                    sys.stderr.flush()
+            if total_size:
+                sys.stderr.write("\n")
+        logger.info("Extracting...")
+        shutil.unpack_archive(tmp_zip, os.path.dirname(model_path))
+        os.remove(tmp_zip)
+        logger.success("Model ready.")
 
     def transcribe_stream(self, audio_stream: Iterator[bytes], on_phrase=None, rate: int = 16000) -> str:
         rec, res = KaldiRecognizer(self.model, rate), []

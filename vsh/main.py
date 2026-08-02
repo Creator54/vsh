@@ -15,7 +15,6 @@ from vsh.core.setup import (
 )
 from vsh.providers import resolve_stt, resolve_thinker, resolve_tts
 
-DEFAULT_VOSK_MODEL = "vosk-model-en-in-0.5"
 VERBOSE = False
 
 # Programs invoke $SHELL with `-c`, so handle it before Typer parses the arguments.
@@ -152,9 +151,8 @@ def stt(
 
     stt_provider = resolve_stt(config)
     if not stt_provider:
-        from vsh.providers.vosk import VoskSTTProvider
-
-        stt_provider = VoskSTTProvider(config.stt.model or DEFAULT_VOSK_MODEL)
+        typer.echo("Error: Speech recognition provider not configured. Run 'vsh setup' to configure.", err=True)
+        raise typer.Exit(code=1)
     if file == "-":
         res = stt_provider.transcribe_stream(iter(lambda: sys.stdin.buffer.read(4000), b""))
     elif file:
