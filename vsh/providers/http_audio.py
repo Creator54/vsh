@@ -1,4 +1,3 @@
-import wave
 from collections.abc import Iterator
 
 import numpy as np

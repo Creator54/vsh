@@ -1,3 +1,5 @@
+from loguru import logger
+
 from vsh.core.config import VshConfig
 from vsh.providers.gcp_stt import GcpSTTProvider
 from vsh.providers.http_audio import HttpSTTProvider, HttpTTSProvider
@@ -19,9 +21,6 @@ _TTS_REGISTRY = {
     "polly": lambda c: AwsPollyTTSProvider(voice=getattr(c.tts, "model", "Matthew") or "Matthew"),
     "sarvam": lambda c: SarvamTTSProvider(c.tts),
 }
-
-
-from loguru import logger
 
 
 def resolve_stt(config: VshConfig):

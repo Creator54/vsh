@@ -83,6 +83,14 @@ def _voice_prompt(transcript: str, mode: str) -> str:
     )
 
 
+def _get_vsh_runtime_dir() -> str:
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    runtime = os.path.join(base, "vsh") if base else os.path.expanduser("~/.vsh/run")
+    os.makedirs(runtime, mode=0o700, exist_ok=True)
+    os.chmod(runtime, 0o700)
+    return runtime
+
+
 class PtyShell:
     def __init__(
         self,
@@ -353,14 +361,10 @@ class PtyShell:
         """Publish speech and command as one ordered terminal update."""
         is_fish = self.shell_name.lower().rsplit("-", 1)[-1] == "fish"
         use_signal_bridge = (
-            (self.config.shell.response_bridge == "fish-signal" and is_fish)
-            or self.config.shell.response_bridge in ("signal", "ipc")
-        )
+            self.config.shell.response_bridge == "fish-signal" and is_fish
+        ) or self.config.shell.response_bridge in ("signal", "ipc")
         if use_signal_bridge and self.shell_pid:
-            base = os.environ.get("XDG_RUNTIME_DIR")
-            runtime = os.path.join(base, "vsh") if base else os.path.expanduser("~/.vsh/run")
-            os.makedirs(runtime, mode=0o700, exist_ok=True)
-            os.chmod(runtime, 0o700)
+            runtime = _get_vsh_runtime_dir()
             paths = {
                 "response": os.path.join(runtime, f"{self.shell_pid}.response"),
                 "command": os.path.join(runtime, f"{self.shell_pid}.command"),
@@ -457,8 +461,7 @@ class PtyShell:
     def _cleanup_ipc_files(self):
         if not self.shell_pid:
             return
-        base = os.environ.get("XDG_RUNTIME_DIR")
-        runtime = os.path.join(base, "vsh") if base else os.path.expanduser("~/.vsh/run")
+        runtime = _get_vsh_runtime_dir()
         for suffix in ("response", "command", "submit"):
             path = os.path.join(runtime, f"{self.shell_pid}.{suffix}")
             try:

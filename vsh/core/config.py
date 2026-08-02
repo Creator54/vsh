@@ -91,13 +91,13 @@ def load_config() -> VshConfig:
         except Exception as error:
             logger.error(f"Failed to load {config_path}: {error}")
 
-        for profile in cfg.custom_thinkers.values():
-            if "api_key_env" in profile:
-                profile["api_key"] = os.environ.get(profile["api_key_env"], "")
+    for profile in cfg.custom_thinkers.values():
+        if "api_key_env" in profile:
+            profile["api_key"] = os.environ.get(profile["api_key_env"], "")
 
-        for provider in (cfg.stt, cfg.tts, cfg.llm):
-            if provider.api_key_env and not provider.api_key:
-                provider.api_key = os.environ.get(provider.api_key_env, "")
+    for provider in (cfg.stt, cfg.tts, cfg.llm):
+        if provider.api_key_env and not provider.api_key:
+            provider.api_key = os.environ.get(provider.api_key_env, "")
 
     if "VSH_SHELL" in os.environ:
         cfg.shell.inner_shell = os.environ["VSH_SHELL"]

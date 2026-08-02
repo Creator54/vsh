@@ -116,11 +116,7 @@ def test_frames_during_known_keyboard_activity_are_discarded():
 
 def test_short_command_keeps_only_preroll_and_phrase_audio():
     decisions = [False] * 30 + [True] * 13 + [False] * 15
-    frames = (
-        [pcm_frame(100 + index) for index in range(30)]
-        + sine_pcm_frames(5000, 1000, 13)
-        + [pcm_frame(100)] * 15
-    )
+    frames = [pcm_frame(100 + index) for index in range(30)] + sine_pcm_frames(5000, 1000, 13) + [pcm_frame(100)] * 15
     activity = []
 
     capture = detect_phrase(
@@ -205,9 +201,7 @@ def test_varying_road_noise_is_rejected_when_vad_sticks_true():
     frame_count = 500
     samples = np.arange(320 * frame_count) / 16_000
     envelope = 2500 + 5500 * (0.5 + 0.5 * np.sin(2 * np.pi * 0.7 * samples))
-    signal = envelope * (
-        0.75 * np.sin(2 * np.pi * 90 * samples) + 0.25 * np.sin(2 * np.pi * 180 * samples)
-    )
+    signal = envelope * (0.75 * np.sin(2 * np.pi * 90 * samples) + 0.25 * np.sin(2 * np.pi * 180 * samples))
     decisions = [False] * 25 + [True] * (frame_count - 25)
 
     capture = detect_phrase(split_frames(signal), vad=SequenceVad(decisions))
@@ -218,13 +212,10 @@ def test_varying_road_noise_is_rejected_when_vad_sticks_true():
 def test_voice_band_command_is_accepted_over_road_noise():
     frame_count = 70
     samples = np.arange(320 * frame_count) / 16_000
-    signal = 2500 * (
-        0.75 * np.sin(2 * np.pi * 90 * samples) + 0.25 * np.sin(2 * np.pi * 180 * samples)
-    )
+    signal = 2500 * (0.75 * np.sin(2 * np.pi * 90 * samples) + 0.25 * np.sin(2 * np.pi * 180 * samples))
     start, end = 320 * 30, 320 * 43
     signal[start:end] += 10_000 * (
-        0.65 * np.sin(2 * np.pi * 600 * samples[start:end])
-        + 0.35 * np.sin(2 * np.pi * 1200 * samples[start:end])
+        0.65 * np.sin(2 * np.pi * 600 * samples[start:end]) + 0.35 * np.sin(2 * np.pi * 1200 * samples[start:end])
     )
 
     capture = detect_phrase(split_frames(signal), vad=SequenceVad([True] * frame_count))
@@ -254,7 +245,7 @@ def test_suspended_stream_drops_callback_audio_and_clears_stale_frames():
 
 
 def test_mic_stream_falls_back_to_default_device_on_open_failure():
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
 
     stream = MicStream.__new__(MicStream)
     stream.rate, stream.chunk, stream.device_index = 16000, 1024, 99

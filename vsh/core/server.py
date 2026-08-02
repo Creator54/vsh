@@ -7,6 +7,8 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from loguru import logger
+
 
 def health_payload(shell):
     return {
@@ -72,9 +74,6 @@ def make_handler(shell):
                 self._send(200, {"status": "error", "output": str(e)})
 
     return Handler
-
-
-from loguru import logger
 
 
 def serve(shell, host="127.0.0.1", port=8770, max_attempts=10):

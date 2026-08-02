@@ -59,4 +59,3 @@ def test_get_default_rc():
     assert get_default_rc("/usr/bin/osh") == "~/.config/oil/oshrc"
     assert get_default_rc("/bin/dash") == "~/.profile"
     assert get_default_rc("/bin/bash") == "~/.bashrc"
-
