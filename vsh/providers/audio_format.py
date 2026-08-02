@@ -23,6 +23,14 @@ def decode_pcm16_wav(data: bytes) -> np.ndarray:
         return decode_pcm16(stream.readframes(stream.getnframes()))
 
 
+def decode_audio_to_pcm16(data: bytes) -> np.ndarray:
+    """Decode audio bytes to float32 normalized PCM, parsing WAV headers or falling back to raw PCM16."""
+    try:
+        return decode_pcm16_wav(data)
+    except (wave.Error, EOFError, ValueError):
+        return decode_pcm16(data)
+
+
 def resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
     duration = len(audio) / source_rate
     target_length = int(duration * target_rate)

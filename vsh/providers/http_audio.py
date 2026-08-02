@@ -5,7 +5,7 @@ import numpy as np
 from loguru import logger
 
 from vsh.core.config import ProviderConfig
-from vsh.providers.audio_format import decode_pcm16, decode_pcm16_wav, encode_pcm_wav
+from vsh.providers.audio_format import decode_audio_to_pcm16, encode_pcm_wav
 
 
 class HttpSTTProvider:
@@ -110,11 +110,7 @@ class HttpTTSProvider:
             response.raise_for_status()
             audio_bytes = response.content
 
-            try:
-                return decode_pcm16_wav(audio_bytes)
-            except wave.Error:
-                logger.warning("Failed to parse WAV header, assuming raw 16-bit PCM")
-                return decode_pcm16(audio_bytes)
+            return decode_audio_to_pcm16(audio_bytes)
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP TTS request failed: {e}")
             if hasattr(e, "response") and e.response is not None:

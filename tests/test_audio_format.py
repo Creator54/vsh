@@ -3,7 +3,7 @@ import wave
 
 import numpy as np
 
-from vsh.providers.audio_format import decode_pcm16, decode_pcm16_wav, encode_pcm_wav, resample
+from vsh.providers.audio_format import decode_audio_to_pcm16, decode_pcm16, decode_pcm16_wav, encode_pcm_wav, resample
 
 
 def test_pcm_wav_round_trip_is_sample_exact():
@@ -16,6 +16,15 @@ def test_pcm_wav_round_trip_is_sample_exact():
         assert stream.getsampwidth() == 2
         assert stream.getframerate() == 16000
     np.testing.assert_array_equal(decode_pcm16_wav(encoded), decode_pcm16(samples.tobytes()))
+
+
+def test_decode_audio_to_pcm16_handles_wav_and_raw_fallback():
+    samples = np.array([-1000, 0, 1000], dtype=np.int16)
+    wav_bytes = encode_pcm_wav(samples.tobytes(), 16000)
+    raw_bytes = samples.tobytes()
+
+    np.testing.assert_array_equal(decode_audio_to_pcm16(wav_bytes), decode_pcm16(raw_bytes))
+    np.testing.assert_array_equal(decode_audio_to_pcm16(raw_bytes), decode_pcm16(raw_bytes))
 
 
 def test_resample_matches_the_existing_linear_interpolation():

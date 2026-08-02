@@ -21,16 +21,31 @@ _TTS_REGISTRY = {
 }
 
 
+from loguru import logger
+
+
 def resolve_stt(config: VshConfig):
     factory = _STT_REGISTRY.get(config.stt.provider)
-    return factory(config) if factory else None
+    if not factory:
+        return None
+    try:
+        return factory(config)
+    except Exception as e:
+        logger.error(f"Failed to initialize STT provider '{config.stt.provider}': {e}")
+        return None
 
 
 def resolve_tts(config: VshConfig):
     if config.tts.provider in ("", "none"):
         return None
     factory = _TTS_REGISTRY.get(config.tts.provider)
-    return factory(config) if factory else None
+    if not factory:
+        return None
+    try:
+        return factory(config)
+    except Exception as e:
+        logger.error(f"Failed to initialize TTS provider '{config.tts.provider}': {e}")
+        return None
 
 
 def resolve_thinker(name: str, config: VshConfig):

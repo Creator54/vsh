@@ -431,6 +431,7 @@ class PtyShell:
             try:
                 self._io_loop()
             finally:
+                self._cleanup_ipc_files()
                 self.mic_monitor.stop()
                 self.mic_monitor.join(timeout=2.0)
                 self.voice_thread.stop()
@@ -452,6 +453,18 @@ class PtyShell:
                         os.waitpid(pid, 0)
                     except ProcessLookupError:
                         pass
+
+    def _cleanup_ipc_files(self):
+        if not self.shell_pid:
+            return
+        base = os.environ.get("XDG_RUNTIME_DIR")
+        runtime = os.path.join(base, "vsh") if base else os.path.expanduser("~/.vsh/run")
+        for suffix in ("response", "command", "submit"):
+            path = os.path.join(runtime, f"{self.shell_pid}.{suffix}")
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     def exec_command(self, command: str, timeout: float = 120.0):
         """Run a command in the live shell and return its output and exit code.

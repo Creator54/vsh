@@ -490,6 +490,26 @@ class OverlayTests(unittest.TestCase):
             self.assertEqual(command.read_text(), "ls")
             kill.assert_called_once_with(4321, signal.SIGUSR1)
 
+    def test_cleanup_ipc_files_unlinks_runtime_files(self):
+        shell = self._make_shell("none")
+        shell.shell_pid = 5555
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"XDG_RUNTIME_DIR": temp_dir}),
+        ):
+            vsh_dir = Path(temp_dir) / "vsh"
+            vsh_dir.mkdir(parents=True, exist_ok=True)
+            res_file = vsh_dir / "5555.response"
+            cmd_file = vsh_dir / "5555.command"
+            res_file.write_text("reply")
+            cmd_file.write_text("ls")
+
+            shell._cleanup_ipc_files()
+
+            self.assertFalse(res_file.exists())
+            self.assertFalse(cmd_file.exists())
+
     def test_graphics_cleanup_is_targeted(self):
         shell = self._make_shell("kitty")
         shell.indicator._graphics_visible = True
