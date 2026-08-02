@@ -199,10 +199,11 @@ class VoiceIndicator:
                 put(x, y, 170 if phase < 3 else 120)
         elif state == VoiceState.LISTENING:
             threshold = max(1, self.threshold)
-            level = 1 if self.energy <= threshold * 2.5 else 2 if self.energy <= threshold * 5 else 3
+            norm_energy = min(1.0, max(0.0, (self.energy - threshold) / (threshold * 6.0)))
             bar_heights = (3, 6, 9, 6, 3)
             for index, x in enumerate(range(3, 13, 2)):
-                height = min(9, bar_heights[(index + phase) % len(bar_heights)] + level)
+                base_h = bar_heights[(index + phase) % len(bar_heights)]
+                height = min(11, max(2, round(base_h * (0.6 + norm_energy * 0.8))))
                 top = 8 - height // 2
                 vline(x, top, top + height - 1)
         elif state == VoiceState.TRANSCRIBING:
