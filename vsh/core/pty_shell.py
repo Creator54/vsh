@@ -157,6 +157,7 @@ class PtyShell:
         self.pipeline_thread = None
         self.old_tty_attrs = None
         self._interrupted = False
+        self._exiting = False
         self.indicator = VoiceIndicator(config.shell.overlay_mode, config.stt.vad_threshold)
         self._current_cursor_state = None
         self._system_mic_muted = None
@@ -426,19 +427,23 @@ class PtyShell:
 
             def show_startup_ui():
                 time.sleep(0.5)
-                self.shell_state = "idle"
-                if self.verbose:
-                    self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} or Ctrl+G to toggle.")
-                if self.config.shell.voice_on_start:
-                    # The toggle renders immediately; injecting a wake-up byte would
-                    # become unwanted input in the inner shell.
-                    self._toggle_listening()
+                if self._exiting or self.master_fd is None:
+                    return
+                try:
+                    self.shell_state = "idle"
+                    if self.verbose:
+                        self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} or Ctrl+G to toggle.")
+                    if self.config.shell.voice_on_start and not self._exiting:
+                        self._toggle_listening()
+                except Exception:
+                    pass
 
             threading.Thread(target=show_startup_ui, daemon=True).start()
 
             try:
                 self._io_loop()
             finally:
+                self._exiting = True
                 self._cleanup_ipc_files()
                 self.mic_monitor.stop()
                 self.mic_monitor.join(timeout=2.0)
@@ -571,7 +576,10 @@ class PtyShell:
 
             if data:
                 self._user_started_typing()
-                os.write(self.master_fd, data)
+                try:
+                    os.write(self.master_fd, data)
+                except OSError:
+                    break
 
             if self.master_fd in ready_r:
                 try:
