@@ -352,7 +352,11 @@ class PtyShell:
     def _publish_reply(self, speech: str, command: str):
         """Publish speech and command as one ordered terminal update."""
         is_fish = self.shell_name.lower().rsplit("-", 1)[-1] == "fish"
-        if self.config.shell.response_bridge == "fish-signal" and self.shell_pid and is_fish:
+        use_signal_bridge = (
+            (self.config.shell.response_bridge == "fish-signal" and is_fish)
+            or self.config.shell.response_bridge in ("signal", "ipc")
+        )
+        if use_signal_bridge and self.shell_pid:
             base = os.environ.get("XDG_RUNTIME_DIR")
             runtime = os.path.join(base, "vsh") if base else os.path.expanduser("~/.vsh/run")
             os.makedirs(runtime, mode=0o700, exist_ok=True)

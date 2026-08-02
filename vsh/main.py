@@ -8,6 +8,7 @@ from vsh.core.config import _get_config_path, load_config
 from vsh.core.pty_shell import PtyShell
 from vsh.core.setup import (
     capture_keybind,
+    get_default_rc,
     interactive_setup,
     update_keybind_config,
     update_shell_rc_bind,
@@ -288,12 +289,7 @@ def bind():
         import shutil
 
         default_shell = os.environ.get("SHELL") or shutil.which("bash") or shutil.which("sh") or "/bin/sh"
-        if "fish" in default_shell:
-            default_rc = "~/.config/fish/config.fish"
-        elif "zsh" in default_shell:
-            default_rc = "~/.zshrc"
-        else:
-            default_rc = "~/.bashrc"
+        default_rc = get_default_rc(default_shell)
 
         rc_file = inquirer.text(message="Shell config file:", default=default_rc).execute()
         update_shell_rc_bind(rc_file, keybind_data, False)

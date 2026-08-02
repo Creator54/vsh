@@ -90,12 +90,26 @@ def capture_keybind():
     return {"name": f"custom ({hex_repr})", "triggers": [hex_repr], "bash": None, "zsh": None, "fish": None}
 
 
+def get_default_rc(shell_path: str) -> str:
+    name = os.path.basename(shell_path or "").lower()
+    if "fish" in name:
+        return "~/.config/fish/config.fish"
+    if "zsh" in name:
+        return "~/.zshrc"
+    if "oil" in name or "osh" in name:
+        return "~/.config/oil/oshrc"
+    if "sh" in name and "bash" not in name:
+        return "~/.profile"
+    return "~/.bashrc"
+
+
 def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: bool) -> bool:
     import re
 
     rc_path = Path(rc_file).expanduser()
-    is_zsh = "zsh" in rc_file
-    is_fish = "fish" in rc_file
+    rc_name = os.path.basename(rc_file).lower()
+    is_zsh = "zsh" in rc_name
+    is_fish = "fish" in rc_name
 
     append_cmd = ""
     if keybind_data:
@@ -477,11 +491,7 @@ def interactive_setup(section: str | None = None) -> None:
         set_default = inquirer.confirm(message="Set vsh as your default interactive shell?", default=False).execute()
 
         if add_shortcut or set_default:
-            default_rc = "~/.bashrc"
-            if "fish" in inner_shell:
-                default_rc = "~/.config/fish/config.fish"
-            elif "zsh" in inner_shell:
-                default_rc = "~/.zshrc"
+            default_rc = get_default_rc(inner_shell)
             rc_file = inquirer.text(message="Shell config file to update:", default=default_rc).execute()
             update_shell_rc_bind(rc_file, keybind_data if add_shortcut else None, set_default)
 

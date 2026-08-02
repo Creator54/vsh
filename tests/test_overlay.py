@@ -471,6 +471,25 @@ class OverlayTests(unittest.TestCase):
         stdout.write.assert_called_once_with("\r\nVoice response\r\n")
         kill.assert_not_called()
 
+    def test_generic_signal_response_bridge_signals_any_shell(self):
+        shell = self._make_shell("none")
+        shell.config.shell.response_bridge = "signal"
+        shell.shell_name = "bash"
+        shell.shell_pid = 4321
+
+        with (
+            tempfile.TemporaryDirectory() as runtime,
+            patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}),
+            patch("os.kill") as kill,
+        ):
+            shell._publish_reply("Voice response", "ls")
+            response = Path(runtime) / "vsh" / "4321.response"
+            command = Path(runtime) / "vsh" / "4321.command"
+
+            self.assertEqual(response.read_text(), "Voice response\n")
+            self.assertEqual(command.read_text(), "ls")
+            kill.assert_called_once_with(4321, signal.SIGUSR1)
+
     def test_graphics_cleanup_is_targeted(self):
         shell = self._make_shell("kitty")
         shell.indicator._graphics_visible = True

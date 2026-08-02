@@ -2,7 +2,7 @@ import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
-from vsh.core.setup import update_keybind_config, update_shell_rc_bind
+from vsh.core.setup import get_default_rc, update_keybind_config, update_shell_rc_bind
 
 
 def test_keybind_update_preserves_other_tables_and_values(tmp_path: Path):
@@ -51,3 +51,12 @@ def test_fish_shell_update_replaces_one_managed_block(tmp_path: Path):
     assert content.count("# --- vsh configuration start ---") == 1
     assert "bind \\c] 'vsh --voice; commandline -f repaint'" in content
     assert "if not set -q VSH_ACTIVE; and isatty 1" in content
+
+
+def test_get_default_rc():
+    assert get_default_rc("/usr/bin/fish") == "~/.config/fish/config.fish"
+    assert get_default_rc("/bin/zsh") == "~/.zshrc"
+    assert get_default_rc("/usr/bin/osh") == "~/.config/oil/oshrc"
+    assert get_default_rc("/bin/dash") == "~/.profile"
+    assert get_default_rc("/bin/bash") == "~/.bashrc"
+
