@@ -1,12 +1,10 @@
 import base64
-import logging
 
 import numpy as np
 import requests
+from loguru import logger
 
 from vsh.providers.audio_format import decode_pcm16_wav, encode_pcm_wav, resample
-
-logger = logging.getLogger(__name__)
 
 
 class SarvamSTTProvider:
@@ -28,7 +26,7 @@ class SarvamSTTProvider:
         data = {"prompt": "Terminal command voice input."}
 
         try:
-            response = requests.post(self.endpoint, headers=headers, files=files, data=data)
+            response = requests.post(self.endpoint, headers=headers, files=files, data=data, timeout=15)
             response.raise_for_status()
             resp_json = response.json()
 
@@ -66,7 +64,7 @@ class SarvamTTSProvider:
         }
 
         try:
-            response = requests.post(self.endpoint, headers=headers, json=payload)
+            response = requests.post(self.endpoint, headers=headers, json=payload, timeout=15)
             response.raise_for_status()
             resp_json = response.json()
 

@@ -4,6 +4,7 @@ import shlex
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any
 
 
 class HttpThinker:
@@ -78,7 +79,7 @@ class HttpThinker:
             return [self._substitute(item, prompt) for item in obj]
         return obj
 
-    def _extract(self, data: dict, path: str):
+    def _extract(self, data: Any, path: str):
         """Extract value from nested dict using dot-path (e.g. choices.0.message.content)."""
         current = data
         for part in path.split("."):
