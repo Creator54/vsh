@@ -9,6 +9,7 @@ from loguru import logger
 @dataclass
 class ShellConfig:
     inner_shell: str = ""
+    inner_shell_args: list[str] = field(default_factory=list)
     voice_on_start: bool = False
     auto_submit: bool = False
     overlay_mode: str = "auto"

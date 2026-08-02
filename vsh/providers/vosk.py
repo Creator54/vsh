@@ -17,7 +17,7 @@ from vosk import KaldiRecognizer, Model  # noqa: E402
 class VoskSTTProvider:
     """Vosk Offline Speech-to-Text provider."""
 
-    def __init__(self, model_name: str = None, model_url: str = None):
+    def __init__(self, model_name: str | None = None, model_url: str | None = None):
         if not model_name:
             raise ValueError("No Vosk model name configured. Run 'vsh setup' to select a model.")
         self.model_name = model_name

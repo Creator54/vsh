@@ -344,6 +344,10 @@ class PtyShell:
         if getattr(self.config.shell, "auto_submit", False) and not cmd.endswith("\n"):
             cmd += "\n"
 
+        if self.master_fd is None:
+            logger.error("Failed to write to PTY: master_fd is None")
+            return
+
         try:
             os.write(self.master_fd, cmd.encode())
         except OSError as e:
@@ -488,6 +492,9 @@ class PtyShell:
                 hist_lines = [line for line in clean_hist.split("\n") if line.strip()]
                 if hist_lines:
                     baseline_tail = hist_lines[-1].strip()
+
+            if self.master_fd is None:
+                raise RuntimeError("PTY shell master_fd is not initialized")
 
             os.write(self.master_fd, command.encode() + b"\n")
 

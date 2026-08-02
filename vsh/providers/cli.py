@@ -1,5 +1,6 @@
 import shlex
 import subprocess
+from typing import Any
 
 
 class CliThinker:
@@ -14,13 +15,13 @@ class CliThinker:
             return "echo 'I did not catch that.'\n"
         try:
             cmd = self.command
-            stdin_input = prompt
+            stdin_input: str | None = prompt
 
             if "{}" in cmd:
                 cmd = cmd.replace("{}", shlex.quote(prompt))
                 stdin_input = None
 
-            options = {
+            options: dict[str, Any] = {
                 "capture_output": True,
                 "text": True,
                 "timeout": self.timeout,

@@ -169,6 +169,11 @@ class VoiceInputThread(threading.Thread):
         if self.verbose:
             logger.info(f"Captured phrase: {len(capture.chunks)} frames")
 
+        if self.stt_provider is None:
+            logger.warning("No STT provider configured for voice input.")
+            self._finish_processing()
+            return False
+
         try:
             text = self.stt_provider.transcribe_stream(iter(capture.chunks)).strip()
         except Exception:
