@@ -344,4 +344,41 @@ def bind():
 
 
 if __name__ == "__main__":
-    app()
+    if len(sys.argv) == 1:
+        if _is_vsh_active_on_this_terminal():
+            sys.stderr.write("Already running inside VSH on this terminal\n")
+            sys.exit(0)
+        config = load_config()
+        voice_handler = None
+        if config.shell.voice_handler:
+            from vsh.providers.cli import CliThinker
+
+            voice_handler = CliThinker(command=config.shell.voice_handler, timeout=300)
+
+        thinker = None
+        if not voice_handler and config.llm.provider:
+            try:
+                thinker = resolve_thinker(config.llm.provider, config)
+            except Exception as e:
+                sys.stderr.write(f"Failed to load AI provider '{config.llm.provider}': {e}\n")
+
+        tts_provider = None
+        try:
+            tts_provider = resolve_tts(config)
+        except Exception as e:
+            sys.stderr.write(f"Failed to load TTS '{config.tts.provider}': {e}\n")
+
+        pty_shell = PtyShell(
+            config,
+            thinker,
+            verbose=False,
+            tts_provider=tts_provider,
+            voice_handler=voice_handler,
+        )
+        try:
+            pty_shell.run()
+        except Exception as e:
+            sys.stderr.write(f"Shell crashed: {e}\n")
+        sys.exit(0)
+    else:
+        app()

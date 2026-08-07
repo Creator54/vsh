@@ -164,3 +164,12 @@ def test_hallucination_returns_to_idle():
     assert not queued
     assert states == [VoiceState.TRANSCRIBING, VoiceState.IDLE]
     assert not thread.is_processing
+
+
+def test_voice_thread_is_daemon_and_stops_cleanly():
+    thread = VoiceInputThread(queue.Queue())
+    assert thread.daemon
+    thread.stop()
+    assert thread.should_exit
+    assert not thread.is_listening
+

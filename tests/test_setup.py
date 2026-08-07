@@ -54,6 +54,19 @@ def test_fish_shell_update_replaces_one_managed_block(tmp_path: Path):
     assert 'test "$VSH_ACTIVE_TTY" != (tty)' in content
 
 
+def test_shell_update_prepends_managed_block_when_setting_default(tmp_path: Path):
+    config = tmp_path / "config.fish"
+    config.write_text("set -gx EDITOR nvim\n")
+
+    with patch("sys.stdout"):
+        assert update_shell_rc_bind(str(config), None, True)
+
+    content = config.read_text()
+    assert content.startswith("# --- vsh configuration start ---")
+    assert 'test "$VSH_ACTIVE_TTY" != (tty)' in content
+    assert "set -gx EDITOR nvim\n" in content
+
+
 def test_get_default_rc():
     assert get_default_rc("/usr/bin/fish") == "~/.config/fish/config.fish"
     assert get_default_rc("/bin/zsh") == "~/.zshrc"

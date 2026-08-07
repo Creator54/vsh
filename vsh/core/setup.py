@@ -157,6 +157,8 @@ def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: b
         pattern = re.compile(f"\\n?{block_start}.*?{block_end}\\n?", re.DOTALL)
         if pattern.search(content):
             new_content = pattern.sub(lambda _: block, content)
+        elif set_default:
+            new_content = block.lstrip() + ("\n" + content.lstrip() if content else "")
         else:
             new_content = content.rstrip() + block
 

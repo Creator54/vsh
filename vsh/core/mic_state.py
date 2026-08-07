@@ -118,7 +118,10 @@ class PipeWireMicMonitor(threading.Thread):
                     process.stdout.close()
             except OSError:
                 pass
-            process.terminate()
+            try:
+                process.kill()
+            except OSError:
+                pass
 
     def run(self):
         if not self._command:

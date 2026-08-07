@@ -45,8 +45,7 @@ class VoiceInputThread(threading.Thread):
         volume_callback=None,
         state_callback=None,
     ):
-        super().__init__(name="VoiceInputThread")
-        self.daemon = False
+        super().__init__(name="VoiceInputThread", daemon=True)
         self.stt_queue = stt_queue
         self.config = config
         self.device_index = device_index
@@ -108,7 +107,10 @@ class VoiceInputThread(threading.Thread):
         self.is_listening = False
         with self._processing_lock:
             if self._active_stream is not None:
-                self._active_stream.resume()
+                try:
+                    self._active_stream.abort()
+                except Exception:
+                    pass
         self._toggle_event.set()
 
     def _capture_enabled(self) -> bool:

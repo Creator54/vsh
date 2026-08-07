@@ -449,27 +449,29 @@ class PtyShell:
                 self._io_loop()
             finally:
                 self._exiting = True
+                self._restore_terminal()
+                if self.master_fd is not None:
+                    try:
+                        os.close(self.master_fd)
+                    except OSError:
+                        pass
+                    self.master_fd = None
+                try:
+                    self.stt_queue.put_nowait(None)
+                except Exception:
+                    pass
                 self._cleanup_ipc_files()
                 self.mic_monitor.stop()
-                self.mic_monitor.join(timeout=2.0)
+                self.mic_monitor.join(timeout=0.01)
                 self.voice_thread.stop()
-                self.voice_thread.join(timeout=2.0)
-                self._restore_terminal()
-                self.stt_queue.put(None)
-                for _ in range(50):
+                self.voice_thread.join(timeout=0.01)
+                if self.shell_pid:
                     try:
-                        wpid, _ = os.waitpid(pid, os.WNOHANG)
-                        if wpid != 0:
-                            break
-                    except ChildProcessError:
-                        break
-                    time.sleep(0.1)
-                else:
-                    logger.warning("Child shell did not exit; sending SIGTERM")
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                        os.waitpid(pid, 0)
-                    except ProcessLookupError:
+                        wpid, _ = os.waitpid(self.shell_pid, os.WNOHANG)
+                        if wpid == 0:
+                            os.kill(self.shell_pid, signal.SIGKILL)
+                            os.waitpid(self.shell_pid, 0)
+                    except (ChildProcessError, ProcessLookupError, OSError):
                         pass
 
     def _cleanup_ipc_files(self):

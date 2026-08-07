@@ -1,34 +1,28 @@
 from loguru import logger
 
 from vsh.core.config import VshConfig
-from vsh.providers.gcp_stt import GcpSTTProvider
-from vsh.providers.http_audio import HttpSTTProvider, HttpTTSProvider
-from vsh.providers.polly import AwsPollyTTSProvider
-from vsh.providers.sarvam import SarvamSTTProvider, SarvamTTSProvider
-from vsh.providers.supertonic import SupertonicTTSProvider
-from vsh.providers.vosk import VoskSTTProvider
-
-_STT_REGISTRY = {
-    "custom_http": lambda c: HttpSTTProvider(c.stt),
-    "vosk": lambda c: VoskSTTProvider(model_name=c.stt.model, model_url=c.stt.url),
-    "gcp": lambda c: GcpSTTProvider(language_code=getattr(c.stt, "model", "en-US") or "en-US"),
-    "sarvam": lambda c: SarvamSTTProvider(c.stt),
-}
-
-_TTS_REGISTRY = {
-    "custom_http": lambda c: HttpTTSProvider(c.tts),
-    "supertonic": lambda c: SupertonicTTSProvider(),
-    "polly": lambda c: AwsPollyTTSProvider(voice=getattr(c.tts, "model", "Matthew") or "Matthew"),
-    "sarvam": lambda c: SarvamTTSProvider(c.tts),
-}
-
-
 def resolve_stt(config: VshConfig):
-    factory = _STT_REGISTRY.get(config.stt.provider)
-    if not factory:
+    provider = config.stt.provider
+    if not provider:
         return None
     try:
-        return factory(config)
+        if provider == "custom_http":
+            from vsh.providers.http_audio import HttpSTTProvider
+
+            return HttpSTTProvider(config.stt)
+        elif provider == "vosk":
+            from vsh.providers.vosk import VoskSTTProvider
+
+            return VoskSTTProvider(model_name=config.stt.model, model_url=config.stt.url)
+        elif provider == "gcp":
+            from vsh.providers.gcp_stt import GcpSTTProvider
+
+            return GcpSTTProvider(language_code=getattr(config.stt, "model", "en-US") or "en-US")
+        elif provider == "sarvam":
+            from vsh.providers.sarvam import SarvamSTTProvider
+
+            return SarvamSTTProvider(config.stt)
+        return None
     except Exception as e:
         logger.error(f"Failed to initialize STT provider '{config.stt.provider}': {e}")
         return None
@@ -37,11 +31,25 @@ def resolve_stt(config: VshConfig):
 def resolve_tts(config: VshConfig):
     if config.tts.provider in ("", "none"):
         return None
-    factory = _TTS_REGISTRY.get(config.tts.provider)
-    if not factory:
-        return None
+    provider = config.tts.provider
     try:
-        return factory(config)
+        if provider == "custom_http":
+            from vsh.providers.http_audio import HttpTTSProvider
+
+            return HttpTTSProvider(config.tts)
+        elif provider == "supertonic":
+            from vsh.providers.supertonic import SupertonicTTSProvider
+
+            return SupertonicTTSProvider()
+        elif provider == "polly":
+            from vsh.providers.polly import AwsPollyTTSProvider
+
+            return AwsPollyTTSProvider(voice=getattr(config.tts, "model", "Matthew") or "Matthew")
+        elif provider == "sarvam":
+            from vsh.providers.sarvam import SarvamTTSProvider
+
+            return SarvamTTSProvider(config.tts)
+        return None
     except Exception as e:
         logger.error(f"Failed to initialize TTS provider '{config.tts.provider}': {e}")
         return None

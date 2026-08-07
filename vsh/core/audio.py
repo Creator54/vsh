@@ -271,12 +271,28 @@ class MicStream:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._stream:
-            self._stream.stop_stream()
-            self._stream.close()
-        self._audio.terminate()
+            try:
+                if self._stream.is_active():
+                    self._stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        if self._audio:
+            try:
+                self._audio.terminate()
+            except Exception:
+                pass
+            self._audio = None
         with self._capture_lock:
             self._clear_pending_locked()
-            self._queue.put_nowait(None)
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                pass
 
     def _callback(self, in_data, frame_count, time_info, status):
         with self._capture_lock:
@@ -306,6 +322,16 @@ class MicStream:
         with self._capture_lock:
             self._clear_pending_locked()
             self._suspended.clear()
+
+    def abort(self):
+        """Immediately unblock queue consumers on exit."""
+        with self._capture_lock:
+            self._suspended.set()
+            self._clear_pending_locked()
+            try:
+                self._queue.put_nowait(None)
+            except Exception:
+                pass
 
     def _frames(self, stop_check=None):
         frame_bytes = self.rate * 20 // 1000 * 2
