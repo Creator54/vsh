@@ -102,15 +102,15 @@ class VoiceInputThread(threading.Thread):
         self._toggle_event.set()
 
     def stop(self):
-        """Signal the thread to shut down completely."""
+        """Signal the thread to shut down completely without blocking."""
         self.should_exit = True
         self.is_listening = False
-        with self._processing_lock:
-            if self._active_stream is not None:
-                try:
-                    self._active_stream.abort()
-                except Exception:
-                    pass
+        stream = self._active_stream
+        if stream is not None:
+            try:
+                stream.abort()
+            except Exception:
+                pass
         self._toggle_event.set()
 
     def _capture_enabled(self) -> bool:

@@ -458,10 +458,14 @@ class PtyShell:
                 except Exception:
                     pass
                 self._cleanup_ipc_files()
-                self.mic_monitor.stop()
-                self.mic_monitor.join(timeout=0.01)
-                self.voice_thread.stop()
-                self.voice_thread.join(timeout=0.01)
+                try:
+                    self.mic_monitor.stop()
+                except Exception:
+                    pass
+                try:
+                    self.voice_thread.stop()
+                except Exception:
+                    pass
                 if self.shell_pid:
                     try:
                         try:
