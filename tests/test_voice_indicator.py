@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,3 +39,38 @@ def test_tmux_graphics_passthrough_remains_exact():
         wrapped = VoiceIndicator._terminal_sequence(sequence)
 
     assert wrapped == b"\033Ptmux;\033\033_Gi=1;AAAA\033\033\\\033\\"
+
+
+def test_restore_waits_for_inflight_graphics_render_and_writes_last():
+    indicator = VoiceIndicator("kitty", 1000)
+    indicator.mode = "graphics"
+    render_started = threading.Event()
+    release_render = threading.Event()
+    restored = threading.Event()
+    writes = []
+
+    class BlockingOutput:
+        def write(self, data):
+            writes.append(data)
+            if len(writes) == 1:
+                render_started.set()
+                assert release_render.wait(timeout=1)
+
+        def flush(self):
+            pass
+
+    with patch("sys.stdout") as stdout:
+        stdout.buffer = BlockingOutput()
+        renderer = threading.Thread(target=indicator.render, args=(VoiceState.IDLE,))
+        restorer = threading.Thread(target=lambda: (indicator.restore(), restored.set()))
+        renderer.start()
+        assert render_started.wait(timeout=1)
+        restorer.start()
+        assert not restored.wait(timeout=0.1)
+        release_render.set()
+        renderer.join(timeout=1)
+        restorer.join(timeout=1)
+
+    assert restored.is_set()
+    assert b"a=d,d=I" in writes[-1]
+    assert not indicator._graphics_visible

@@ -1,6 +1,13 @@
+import multiprocessing
+import os
 import queue
+import threading
+from pathlib import Path
+from unittest.mock import patch
 
+import vsh.core.audio as audio_module
 from vsh.core.audio import PhraseCapture
+from vsh.core.microphone import acquire_microphone, release_microphone
 from vsh.core.voice_input import VoiceInputThread, VoiceState, _is_silence_hallucination, _is_valid_transcript
 
 
@@ -40,6 +47,13 @@ class FakeProvider:
         return self.text
 
 
+def _acquire_microphone_in_process(runtime_dir: str, result) -> None:
+    os.environ["XDG_RUNTIME_DIR"] = runtime_dir
+    lease = acquire_microphone()
+    result.put(lease is not None)
+    release_microphone(lease)
+
+
 def make_thread(provider, states):
     thread = VoiceInputThread(queue.Queue(), state_callback=states.append)
     thread.stt_provider = provider
@@ -48,13 +62,71 @@ def make_thread(provider, states):
     return thread
 
 
-def test_toggle_does_not_load_the_model_on_the_terminal_thread():
+def test_toggle_does_not_load_the_model_on_the_terminal_thread(tmp_path: Path):
     states = []
     thread = VoiceInputThread(queue.Queue(), state_callback=states.append)
     thread.load_model = lambda: (_ for _ in ()).throw(AssertionError("loaded synchronously"))
 
-    assert thread.toggle_listening()
-    assert states == [VoiceState.IDLE]
+    with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(tmp_path)}):
+        assert thread.toggle_listening()
+        assert states == [VoiceState.IDLE]
+        thread.stop()
+
+
+def test_microphone_lease_is_exclusive_and_released(tmp_path: Path):
+    context = multiprocessing.get_context("spawn")
+    result = context.Queue()
+    with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(tmp_path)}):
+        lease = acquire_microphone()
+        assert lease is not None
+        process = context.Process(target=_acquire_microphone_in_process, args=(str(tmp_path), result))
+        process.start()
+        process.join(timeout=5)
+        assert process.exitcode == 0
+        assert result.get(timeout=1) is False
+        release_microphone(lease)
+
+        process = context.Process(target=_acquire_microphone_in_process, args=(str(tmp_path), result))
+        process.start()
+        process.join(timeout=5)
+        assert process.exitcode == 0
+        assert result.get(timeout=1) is True
+
+
+def test_voice_capture_does_not_hold_the_process_stderr_lock():
+    entered = threading.Event()
+
+    class ActiveStream:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            entered.set()
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def suspend(self):
+            pass
+
+        def abort(self):
+            pass
+
+    thread = VoiceInputThread(queue.Queue())
+    thread.is_listening = True
+    thread.is_processing = True
+    thread.load_model = lambda: None
+
+    with patch("vsh.core.audio.MicStream", ActiveStream):
+        thread.start()
+        assert entered.wait(timeout=1)
+        assert audio_module._STDERR_LOCK.acquire(timeout=0.2)
+        audio_module._STDERR_LOCK.release()
+        thread.stop()
+        thread.join(timeout=1)
+
+    assert not thread.is_alive()
 
 
 def test_processing_state_suspends_and_resumes_the_active_stream():
@@ -172,4 +244,3 @@ def test_voice_thread_is_daemon_and_stops_cleanly():
     thread.stop()
     assert thread.should_exit
     assert not thread.is_listening
-

@@ -63,9 +63,11 @@ class VoiceInputThread(threading.Thread):
         self.system_mic_muted = None
 
         self._toggle_event = threading.Event()
+        self._toggle_lock = threading.Lock()
         self._suppress_until = 0.0
         self._processing_lock = threading.Lock()
         self._active_stream = None
+        self._microphone_lease = None
 
     def suppress_input(self, duration: float = 0.6):
         """Ignore brief audio caused by a known keypress."""
@@ -91,7 +93,19 @@ class VoiceInputThread(threading.Thread):
 
     def toggle_listening(self) -> bool:
         """Toggle listening state and return the new state."""
-        self.is_listening = not self.is_listening
+        from vsh.core.microphone import acquire_microphone, release_microphone
+
+        with self._toggle_lock:
+            if self.is_listening:
+                self.is_listening = False
+                release_microphone(self._microphone_lease)
+                self._microphone_lease = None
+            else:
+                lease = acquire_microphone()
+                if lease is None:
+                    return False
+                self._microphone_lease = lease
+                self.is_listening = True
         self._toggle_event.set()
         if self.state_callback:
             self.state_callback(VoiceState.IDLE if self.is_listening else None)
@@ -103,8 +117,13 @@ class VoiceInputThread(threading.Thread):
 
     def stop(self):
         """Signal the thread to shut down completely without blocking."""
+        from vsh.core.microphone import release_microphone
+
         self.should_exit = True
-        self.is_listening = False
+        with self._toggle_lock:
+            self.is_listening = False
+            release_microphone(self._microphone_lease)
+            self._microphone_lease = None
         stream = self._active_stream
         if stream is not None:
             try:
@@ -208,9 +227,9 @@ class VoiceInputThread(threading.Thread):
                 self.load_model()
                 if not self._capture_enabled():
                     continue
-                from vsh.core.audio import MicStream, no_stderr
+                from vsh.core.audio import MicStream
 
-                with no_stderr(), MicStream(device_index=self.device_index) as stream:
+                with MicStream(device_index=self.device_index) as stream:
                     self._set_active_stream(stream)
                     try:
                         while self._capture_enabled() and not self.should_exit:

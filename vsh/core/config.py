@@ -64,10 +64,10 @@ def _get_config_path() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "vsh" / "config.toml"
 
 
-def interactive_setup(section: str | None = None) -> None:
+def interactive_setup(section: str | None = None, *, skip_if_configured: bool = False) -> None:
     from vsh.core.setup import interactive_setup as run_setup
 
-    run_setup(section)
+    run_setup(section, skip_if_configured=skip_if_configured)
 
 
 def load_config() -> VshConfig:
@@ -131,7 +131,7 @@ def load_config() -> VshConfig:
         cfg.shell.response_bridge = os.environ["VSH_RESPONSE_BRIDGE"]
 
     if not config_path.exists():
-        interactive_setup()
+        interactive_setup(skip_if_configured=True)
         return load_config()
 
     return cfg

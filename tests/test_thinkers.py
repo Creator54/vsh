@@ -1,5 +1,7 @@
 import json
 import subprocess
+import threading
+import time
 import unittest
 import urllib.error
 from unittest.mock import MagicMock, patch
@@ -208,6 +210,66 @@ class TestCliThinker(unittest.TestCase):
         self.assertEqual(result, "echo 'Command timed out'\n")
         killpg.assert_called_once_with(4321, 9)
         self.assertEqual(process.communicate.call_count, 2)
+
+    def test_timeout_cleanup_is_bounded_when_descendant_holds_pipes(self):
+        thinker = CliThinker(command="sleep 5")
+        process = MagicMock(pid=4321)
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="sleep 5", timeout=15),
+            subprocess.TimeoutExpired(cmd="sleep 5", timeout=1),
+        ]
+
+        with patch("subprocess.Popen", return_value=process), patch("os.killpg"):
+            result = thinker.ask("hello")
+
+        self.assertEqual(result, "echo 'Command timed out'\n")
+        process.stdout.close.assert_called_once_with()
+        process.stderr.close.assert_called_once_with()
+
+    def test_cancel_stops_and_reaps_active_process_group(self):
+        thinker = CliThinker(command="sleep 30", timeout=60)
+        result = []
+        worker = threading.Thread(target=lambda: result.append(thinker.ask("hello")))
+        worker.start()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with thinker._lock:
+                if thinker._process is not None:
+                    break
+            time.sleep(0.01)
+        else:
+            self.fail("CLI process did not start")
+
+        thinker.cancel()
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, [""])
+
+    def test_cancel_before_process_publication_still_kills_it(self):
+        thinker = CliThinker(command="voice-handler")
+        started = threading.Event()
+        publish = threading.Event()
+        process = MagicMock(pid=4321)
+        process.communicate.return_value = ("ignored", "")
+
+        def popen(*_args, **_kwargs):
+            started.set()
+            self.assertTrue(publish.wait(timeout=1))
+            return process
+
+        result = []
+        with patch("subprocess.Popen", side_effect=popen), patch("os.killpg") as killpg:
+            worker = threading.Thread(target=lambda: result.append(thinker.ask("hello")))
+            worker.start()
+            self.assertTrue(started.wait(timeout=1))
+            thinker.cancel()
+            publish.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, [""])
+        killpg.assert_called_once_with(4321, 9)
 
     def test_command_not_found(self):
         thinker_shell_false = CliThinker(command="definitely_not_a_real_command_12345")

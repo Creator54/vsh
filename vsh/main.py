@@ -195,15 +195,27 @@ def _get_typer_app():
         else:
             if VERBOSE:
                 logger.info("Listening")
-            from vsh.core.audio import MicStream, no_stderr
+            from vsh.core.audio import MicStream
+            from vsh.core.microphone import acquire_microphone, release_microphone
 
-            with no_stderr(), MicStream(device_index=config.stt.device_index) as s:
-                capture = s.capture_phrase(
-                    threshold=config.stt.vad_threshold,
-                    silence_limit=config.stt.vad_silence_limit,
-                    verbose=VERBOSE,
-                )
-                res = stt_provider.transcribe_stream(iter(capture.chunks)) if capture.accepted else ""
+            try:
+                microphone_lease = acquire_microphone()
+            except OSError as error:
+                typer.echo(f"Failed to acquire microphone: {error}", err=True)
+                raise typer.Exit(code=1) from error
+            if microphone_lease is None:
+                typer.echo("Microphone is already in use by another VSH session.", err=True)
+                raise typer.Exit(code=1)
+            try:
+                with MicStream(device_index=config.stt.device_index) as s:
+                    capture = s.capture_phrase(
+                        threshold=config.stt.vad_threshold,
+                        silence_limit=config.stt.vad_silence_limit,
+                        verbose=VERBOSE,
+                    )
+                    res = stt_provider.transcribe_stream(iter(capture.chunks)) if capture.accepted else ""
+            finally:
+                release_microphone(microphone_lease)
         if res:
             print(res)
 
@@ -275,6 +287,7 @@ def _get_typer_app():
         """Interactively set up a new keybind and update shell config."""
         from vsh.core.config import _get_config_path
         from vsh.core.setup import (
+            _setup_lock,
             capture_keybind,
             get_default_rc,
             update_keybind_config,
@@ -303,28 +316,31 @@ def _get_typer_app():
             sys.stdout.write("Config file not found. Please run 'vsh setup' first.\n")
             return
 
-        try:
-            update_keybind_config(config_path, keybind_data)
-            sys.stdout.write("Updated config.toml with new keybind.\n")
-
-        except Exception as e:
-            sys.stdout.write(f"Failed to update config.toml: {e}\n")
-            return
-
         from InquirerPy import inquirer
 
         update_rc = inquirer.confirm(
             message="Update your shell config (.bashrc/.zshrc) to launch vsh with this keybind?", default=True
         ).execute()
 
+        rc_file = ""
         if update_rc:
             import shutil
 
             default_shell = os.environ.get("SHELL") or shutil.which("bash") or shutil.which("sh") or "/bin/sh"
             default_rc = get_default_rc(default_shell)
-
             rc_file = inquirer.text(message="Shell config file:", default=default_rc).execute()
-            update_shell_rc_bind(rc_file, keybind_data, False)
+
+        with _setup_lock(config_path):
+            if not config_path.exists():
+                sys.stdout.write("Config file was removed during setup. Please run 'vsh setup' first.\n")
+                return
+            try:
+                update_keybind_config(config_path, keybind_data)
+                if rc_file:
+                    update_shell_rc_bind(rc_file, keybind_data, False)
+                sys.stdout.write("Updated config.toml with new keybind.\n")
+            except Exception as e:
+                sys.stdout.write(f"Failed to update keybind: {e}\n")
 
     globals()["app"] = app_obj
     globals()["main"] = main

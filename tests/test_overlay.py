@@ -40,6 +40,7 @@ class OverlayTests(unittest.TestCase):
     def _make_shell(self, mode="auto"):
         cfg = VshConfig()
         cfg.shell.overlay_mode = mode
+        cfg.tts.provider = "none"
         with patch(
             "vsh.core.pty_shell.VoiceInputThread",
             side_effect=lambda *_args, **kwargs: _FakeVoiceThread(kwargs.get("state_callback")),
@@ -327,8 +328,19 @@ class OverlayTests(unittest.TestCase):
             shell._pipeline_worker()
 
         shell.voice_handler.ask.assert_called_once_with("request with spaces and punctuation; $(safe)")
-        dispatch.assert_called_once_with('{"speech":"Ready.","command":"pwd"}')
+        dispatch.assert_called_once_with('{"speech":"Ready.","command":"pwd"}', 0)
         inject.assert_not_called()
+
+    def test_pipeline_discards_queued_work_after_shutdown_starts(self):
+        shell = self._make_shell("none")
+        shell.thinker = MagicMock()
+        shell.stt_queue.put("do not run")
+        shell.stt_queue.put(None)
+        shell._exiting = True
+
+        shell._pipeline_worker()
+
+        shell.thinker.ask.assert_not_called()
 
     def test_generic_thinker_receives_the_json_voice_contract(self):
         shell = self._make_shell("none")
@@ -401,6 +413,55 @@ class OverlayTests(unittest.TestCase):
             shell._dispatch_response('{"speech":"Opening it.","command":"cd /tmp"}')
 
         publish.assert_called_once_with("Opening it.", "cd /tmp")
+
+    def test_tts_is_loaded_only_when_speech_is_requested(self):
+        shell = self._make_shell("none")
+        shell.config.tts.provider = "supertonic"
+        provider = object()
+
+        with patch("vsh.providers.resolve_tts", return_value=provider) as resolve:
+            self.assertIs(shell._load_tts(), provider)
+            self.assertIs(shell._load_tts(), provider)
+
+        resolve.assert_called_once_with(shell.config)
+
+    def test_voice_command_is_skipped_after_keyboard_input_changes(self):
+        shell = self._make_shell("none")
+        shell.shell_pid = 4321
+        shell._input_revision = 2
+
+        with patch("os.tcgetpgrp", return_value=4321), patch("os.write") as write:
+            self.assertFalse(shell._inject_command("pwd", expected_revision=1))
+
+        write.assert_not_called()
+
+    def test_voice_command_is_skipped_while_foreground_program_owns_pty(self):
+        shell = self._make_shell("none")
+        shell.shell_pid = 4321
+
+        with patch("os.tcgetpgrp", return_value=9876), patch("os.write") as write:
+            self.assertFalse(shell._inject_command("pwd", expected_revision=0))
+
+        write.assert_not_called()
+
+    def test_voice_command_is_written_when_input_and_pty_owner_are_unchanged(self):
+        shell = self._make_shell("none")
+        shell.shell_pid = 4321
+
+        with patch("os.tcgetpgrp", return_value=4321), patch("os.write") as write:
+            self.assertTrue(shell._inject_command("pwd", expected_revision=0))
+
+        write.assert_called_once_with(7, b"pwd")
+
+    def test_shutdown_cancels_cli_processors(self):
+        shell = self._make_shell("none")
+        shell.thinker = MagicMock()
+        shell.voice_handler = MagicMock()
+
+        shell._cancel_processors()
+
+        shell.thinker.cancel.assert_called_once_with()
+        shell.voice_handler.cancel.assert_called_once_with()
 
     def test_deprecated_fish_bridge_uses_stdout_and_pty_without_signalling(self):
         shell = self._make_shell("none")

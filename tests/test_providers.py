@@ -1,10 +1,13 @@
 import base64
 import fcntl
 import multiprocessing
+import sys
 import tempfile
+import threading
 import unittest
 from io import BytesIO
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -49,16 +52,99 @@ class TestProviders(unittest.TestCase):
     @patch("supertonic.TTS")
     def test_supertonic_tts_synthesis(self, mock_tts_class):
         mock_engine = MagicMock()
+        mock_engine.sample_rate = 44100
         mock_engine.get_voice_style.return_value = MagicMock()
         mock_wav = MagicMock()
         mock_wav.flatten.return_value = np.zeros(1000)
         mock_engine.synthesize.return_value = (mock_wav, 1.0)
         mock_tts_class.return_value = mock_engine
 
-        tts = SupertonicTTSProvider()
-        result = tts.synthesize(text="test. check.")
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory) / "model"
+            model_dir.mkdir()
+            loader = ModuleType("supertonic.loader")
+            loader.get_cache_dir = lambda: model_dir
+            loader.has_all_onnx_modules = lambda _path: True
+            loader.download_model = MagicMock()
+            with patch.dict(sys.modules, {"supertonic.loader": loader}):
+                tts = SupertonicTTSProvider()
+                self.assertIsNone(tts.engine)
+                result = tts.synthesize(text="test. check.")
         self.assertIsNotNone(result)
         self.assertIsInstance(result, np.ndarray)
+
+    @patch("supertonic.TTS")
+    def test_parallel_supertonic_initialization_downloads_once(self, mock_tts_class):
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory) / "model"
+            model_dir.mkdir()
+            complete = model_dir / "complete"
+            download_started = threading.Event()
+            finish_download = threading.Event()
+            downloads = []
+
+            def download(_path):
+                downloads.append(1)
+                download_started.set()
+                assert finish_download.wait(timeout=2)
+                complete.touch()
+
+            loader = ModuleType("supertonic.loader")
+            loader.get_cache_dir = lambda: model_dir
+            loader.has_all_onnx_modules = lambda _path: complete.exists()
+            loader.download_model = download
+            engine = MagicMock(sample_rate=44100)
+            engine.get_voice_style.return_value = object()
+            wav = MagicMock()
+            wav.flatten.return_value = np.zeros(1)
+            engine.synthesize.return_value = (wav, 1.0)
+            mock_tts_class.return_value = engine
+            providers = (SupertonicTTSProvider(), SupertonicTTSProvider())
+            threads = [threading.Thread(target=provider.synthesize, args=("hello",)) for provider in providers]
+
+            with patch.dict(sys.modules, {"supertonic.loader": loader}):
+                threads[0].start()
+                self.assertTrue(download_started.wait(timeout=1))
+                threads[1].start()
+                finish_download.set()
+                for thread in threads:
+                    thread.join(timeout=2)
+
+            self.assertEqual(downloads, [1])
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+
+    @patch("supertonic.TTS")
+    def test_failed_supertonic_download_releases_install_lock(self, mock_tts_class):
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory) / "model"
+            model_dir.mkdir()
+            complete = model_dir / "complete"
+            attempts = []
+
+            def download(_path):
+                attempts.append(1)
+                if len(attempts) == 1:
+                    raise RuntimeError("download failed")
+                complete.touch()
+
+            loader = ModuleType("supertonic.loader")
+            loader.get_cache_dir = lambda: model_dir
+            loader.has_all_onnx_modules = lambda _path: complete.exists()
+            loader.download_model = download
+            engine = MagicMock(sample_rate=44100)
+            engine.get_voice_style.return_value = object()
+            wav = MagicMock()
+            wav.flatten.return_value = np.zeros(1)
+            engine.synthesize.return_value = (wav, 1.0)
+            mock_tts_class.return_value = engine
+
+            with patch.dict(sys.modules, {"supertonic.loader": loader}):
+                with self.assertRaisesRegex(RuntimeError, "download failed"):
+                    SupertonicTTSProvider().synthesize("hello")
+                result = SupertonicTTSProvider().synthesize("hello")
+
+            self.assertEqual(attempts, [1, 1])
+            self.assertIsInstance(result, np.ndarray)
 
     @patch("requests.post")
     def test_http_stt_sends_the_same_pcm_as_wav(self, post):

@@ -1,11 +1,20 @@
 import fcntl
 import multiprocessing
 import os
+import threading
 import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from vsh.core.setup import _locked_file, get_default_rc, interactive_setup, update_keybind_config, update_shell_rc_bind
+import vsh.core.setup as setup_mod
+from vsh.core.setup import (
+    _locked_file,
+    _setup_lock,
+    get_default_rc,
+    interactive_setup,
+    update_keybind_config,
+    update_shell_rc_bind,
+)
 
 
 def _update_keybind_in_process(config: str, result) -> None:
@@ -86,6 +95,62 @@ def test_keybind_update_waits_for_concurrent_config_writer(tmp_path: Path):
     data = tomllib.loads(config.read_text())
     assert data["stt"] == {"provider": "vosk"}
     assert data["keybinds"] == {"toggle_listen": "ctrl+g", "toggle_listen_triggers": ["07"]}
+
+
+def test_parallel_first_run_setup_prompts_once(tmp_path: Path):
+    calls = []
+    barrier = threading.Barrier(2)
+
+    def fake_setup(_section, config_path):
+        calls.append(config_path)
+        config_path.write_text('[tts]\nprovider = "none"\n')
+
+    def run_setup():
+        barrier.wait()
+        interactive_setup(skip_if_configured=True)
+
+    with (
+        patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}),
+        patch.object(setup_mod, "_interactive_setup", side_effect=fake_setup),
+    ):
+        threads = [threading.Thread(target=run_setup) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+    assert len(calls) == 1
+    assert all(not thread.is_alive() for thread in threads)
+
+
+def test_setup_lock_keeps_config_and_shell_binding_as_one_transaction(tmp_path: Path):
+    config = tmp_path / "config.toml"
+    shell_rc = tmp_path / "config.fish"
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_acquired = threading.Event()
+
+    def write_pair(value, pause=False):
+        with _setup_lock(config):
+            if value == "second":
+                second_acquired.set()
+            config.write_text(value)
+            if pause:
+                first_started.set()
+                assert release_first.wait(timeout=1)
+            shell_rc.write_text(value)
+
+    first = threading.Thread(target=write_pair, args=("first", True))
+    second = threading.Thread(target=write_pair, args=("second",))
+    first.start()
+    assert first_started.wait(timeout=1)
+    second.start()
+    assert not second_acquired.wait(timeout=0.1)
+    release_first.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+
+    assert config.read_text() == shell_rc.read_text() == "second"
 
 
 def test_fish_shell_update_replaces_one_managed_block(tmp_path: Path):

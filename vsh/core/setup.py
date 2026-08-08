@@ -118,6 +118,17 @@ def _locked_file(path: Path):
         yield target
 
 
+@contextlib.contextmanager
+def _setup_lock(config_path: Path):
+    """Serialize setup transactions across VSH processes."""
+    config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = config_path.parent / ".setup.vsh.lock"
+    with lock_path.open("a+") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def _atomic_write_text(path: Path, content: str, default_mode: int = 0o600) -> None:
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else default_mode
     fd, pending = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
@@ -286,12 +297,19 @@ def update_keybind_config(config_path: Path, keybind_data: dict) -> None:
         _atomic_write_text(target, "\n".join(output) + "\n")
 
 
-def interactive_setup(section: str | None = None) -> None:
+def interactive_setup(section: str | None = None, *, skip_if_configured: bool = False) -> None:
     """Prompt the user for configuration and write config.toml."""
+    cfg_path = _get_config_path()
+    with _setup_lock(cfg_path):
+        if skip_if_configured and cfg_path.exists():
+            return
+        _interactive_setup(section, cfg_path)
+
+
+def _interactive_setup(section: str | None, cfg_path: Path) -> None:
     from InquirerPy import inquirer
     from InquirerPy.base.control import Choice
 
-    cfg_path = _get_config_path()
     existing = {}
     if cfg_path.exists():
         try:
@@ -542,6 +560,7 @@ def interactive_setup(section: str | None = None) -> None:
 
     add_shortcut = False
     set_default = False
+    rc_file = ""
 
     if section in (None, "keybind", "keybinds"):
         if inquirer.confirm(message="Set a custom keybind to toggle the microphone?", default=False).execute():
@@ -562,7 +581,6 @@ def interactive_setup(section: str | None = None) -> None:
         if add_shortcut or set_default:
             default_rc = get_default_rc(inner_shell)
             rc_file = inquirer.text(message="Shell config file to update:", default=default_rc).execute()
-            update_shell_rc_bind(rc_file, keybind_data if add_shortcut else None, set_default)
 
     def apply_updates(data: dict) -> None:
         def table(name: str) -> dict:
@@ -656,4 +674,6 @@ def interactive_setup(section: str | None = None) -> None:
                 pass
         apply_updates(latest)
         _atomic_write_text(target, _dump_toml(latest))
+    if rc_file:
+        update_shell_rc_bind(rc_file, keybind_data if add_shortcut else None, set_default)
     sys.stdout.write(f"\nConfiguration successfully written to {cfg_path}\n")

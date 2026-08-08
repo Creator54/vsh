@@ -4,10 +4,10 @@ import re
 import secrets
 import select
 import sys
+import threading
 import time
 
 from vsh.core.logger import logger
-
 from vsh.core.voice_input import VoiceState
 
 CURSOR_RESET = b"\033]112\a\033[0 q"
@@ -51,68 +51,78 @@ class VoiceIndicator:
         self._typing_until = 0.0
         self._alternate_screen = False
         self._control_tail = b""
+        self._lock = threading.RLock()
 
     def select_mode(self, tty_available: bool) -> None:
-        configured = self.configured_mode.lower()
-        if configured not in ("auto", "kitty", "none"):
-            logger.warning(f"Unknown overlay mode {configured!r}; using auto")
-            configured = "auto"
-        if configured == "none" or not tty_available:
-            self.mode = "none"
-        elif configured == "kitty" or self._probe_graphics_support():
-            self.mode = "graphics"
-        else:
-            self.mode = "cursor"
+        with self._lock:
+            configured = self.configured_mode.lower()
+            if configured not in ("auto", "kitty", "none"):
+                logger.warning(f"Unknown overlay mode {configured!r}; using auto")
+                configured = "auto"
+            if configured == "none" or not tty_available:
+                self.mode = "none"
+            elif configured == "kitty" or self._probe_graphics_support():
+                self.mode = "graphics"
+            else:
+                self.mode = "cursor"
 
     def take_pending_input(self) -> bytes:
-        pending, self.pending_input = self.pending_input, b""
-        return pending
+        with self._lock:
+            pending, self.pending_input = self.pending_input, b""
+            return pending
 
     def resize(self, cols: int) -> None:
-        self.cols = cols
+        with self._lock:
+            self.cols = cols
 
     def update_volume(self, energy: int, threshold: int) -> None:
-        self.energy = energy
-        self.threshold = threshold
+        with self._lock:
+            self.energy = energy
+            self.threshold = threshold
 
     def render(self, state: VoiceState | str | None) -> None:
-        state = VoiceState(state) if state is not None else None
-        if self.mode == "cursor":
-            self._render_cursor(state)
-        elif self.mode == "graphics":
-            self._render_graphics(state)
+        with self._lock:
+            state = VoiceState(state) if state is not None else None
+            if self.mode == "cursor":
+                self._render_cursor(state)
+            elif self.mode == "graphics":
+                self._render_graphics(state)
 
     def user_started_typing(self) -> None:
-        self._typing_until = time.monotonic() + 0.6
-        if self.mode == "graphics":
-            self._delete_graphics()
-        elif self.mode == "cursor":
-            self._render_cursor(VoiceState.TYPING)
+        with self._lock:
+            self._typing_until = time.monotonic() + 0.6
+            if self.mode == "graphics":
+                self._delete_graphics()
+            elif self.mode == "cursor":
+                self._render_cursor(VoiceState.TYPING)
 
     def tick(self, state: VoiceState | str | None) -> None:
-        state = VoiceState(state) if state is not None else None
-        if self.mode == "graphics":
-            self._render_graphics(state)
-        elif self.mode == "cursor" and self._typing_until and time.monotonic() >= self._typing_until:
-            self._typing_until = 0.0
-            self._render_cursor(state)
+        with self._lock:
+            state = VoiceState(state) if state is not None else None
+            if self.mode == "graphics":
+                self._render_graphics(state)
+            elif self.mode == "cursor" and self._typing_until and time.monotonic() >= self._typing_until:
+                self._typing_until = 0.0
+                self._render_cursor(state)
 
     def track_output(self, data: bytes) -> None:
-        stream = self._control_tail + data
-        for match in re.finditer(rb"\x1b\[\?(1049|1047|47)(h|l)", stream):
-            entering = match.group(2) == b"h"
-            if entering != self._alternate_screen:
-                self._alternate_screen = entering
-                if entering and self.mode == "graphics":
-                    self._delete_graphics()
-        self._control_tail = stream[-16:]
+        with self._lock:
+            stream = self._control_tail + data
+            for match in re.finditer(rb"\x1b\[\?(1049|1047|47)(h|l)", stream):
+                entering = match.group(2) == b"h"
+                if entering != self._alternate_screen:
+                    self._alternate_screen = entering
+                    if entering and self.mode == "graphics":
+                        self._delete_graphics()
+            self._control_tail = stream[-16:]
 
     def restore(self) -> None:
-        if self.mode == "graphics":
-            self._delete_graphics()
-        elif self.mode == "cursor":
-            sys.stdout.buffer.write(CURSOR_RESET)
-            sys.stdout.buffer.flush()
+        with self._lock:
+            if self.mode == "graphics":
+                self._delete_graphics()
+            elif self.mode == "cursor":
+                sys.stdout.buffer.write(CURSOR_RESET)
+                sys.stdout.buffer.flush()
 
     def _probe_graphics_support(self, timeout: float = 0.25) -> bool:
         image_id = str(self._image_id).encode()

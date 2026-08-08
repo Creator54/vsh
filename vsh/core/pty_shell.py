@@ -153,6 +153,10 @@ class PtyShell:
         self.old_tty_attrs = None
         self._interrupted = False
         self._exiting = False
+        self._tts_lock = threading.Lock()
+        self._input_lock = threading.Lock()
+        self._input_revision = 0
+        self._voice_input_revision = 0
         self.indicator = VoiceIndicator(config.shell.overlay_mode, config.stt.vad_threshold)
         self._current_cursor_state = None
         self._system_mic_muted = None
@@ -169,45 +173,67 @@ class PtyShell:
             transcript = self.stt_queue.get()
             if transcript is None:
                 break
+            try:
+                if self._exiting:
+                    continue
+                expected_revision = self._voice_input_revision
+                if self.verbose:
+                    logger.info(f"Processing: {transcript}")
 
-            if self.verbose:
-                logger.info(f"Processing: {transcript}")
-
-            processor = self.voice_handler or self.thinker
-            if processor:
-                self._set_cursor_state(VoiceState.THINKING)
-                try:
-                    prompt = transcript
-                    if not self.voice_handler:
-                        mode = getattr(self.config.llm, "output_mode", "speak_and_command")
-                        prompt = _voice_prompt(transcript, mode)
-                    self._dispatch_response(processor.ask(prompt))
-                except Exception as e:
-                    self._publish_reply(f"vsh: {e}", "")
+                processor = self.voice_handler or self.thinker
+                if processor:
+                    self._set_cursor_state(VoiceState.THINKING)
+                    try:
+                        prompt = transcript
+                        if not self.voice_handler:
+                            mode = getattr(self.config.llm, "output_mode", "speak_and_command")
+                            prompt = _voice_prompt(transcript, mode)
+                        self._dispatch_response(processor.ask(prompt), expected_revision)
+                    except Exception as e:
+                        self._publish_reply(f"vsh: {e}", "", expected_revision)
+                        self._set_cursor_state(self._resting_voice_state())
+                else:
+                    self._inject_command(transcript, expected_revision)
                     self._set_cursor_state(self._resting_voice_state())
-            else:
-                self._inject_command(transcript)
-                self._set_cursor_state(self._resting_voice_state())
+            finally:
+                self.stt_queue.task_done()
 
-            self.stt_queue.task_done()
+    def _load_tts(self):
+        if self.tts_provider is not None:
+            return self.tts_provider
+        if self.config.tts.provider in ("", "none"):
+            return None
+        with self._tts_lock:
+            if self.tts_provider is None:
+                from vsh.providers import resolve_tts
+
+                self.tts_provider = resolve_tts(self.config)
+                if self.tts_provider is None:
+                    logger.warning(f"Unknown or failed TTS provider: {self.config.tts.provider}")
+        return self.tts_provider
 
     def _speak(self, text: str) -> bool:
         """Play the reply before running its command."""
         try:
             from vsh.core.audio import play_audio, synthesize_pcm16
 
-            data, rate = synthesize_pcm16(self.tts_provider, text)
+            provider = self._load_tts()
+            if provider is None:
+                return False
+            data, rate = synthesize_pcm16(provider, text)
             play_audio(data, rate, device_index=self.config.tts.device_index)
             return True
         except Exception as e:
             logger.error(f"TTS Error: {e}")
             return False
 
-    def _dispatch_response(self, raw: str):
+    def _dispatch_response(self, raw: str, expected_revision: int | None = None):
         """Speak or print the reply, then run its command."""
+        if self._exiting:
+            return
         reply = parse_voice_reply(raw)
         visible_speech = reply.speech
-        if reply.speech and self.tts_provider:
+        if reply.speech and (self.tts_provider is not None or self.config.tts.provider not in ("", "none")):
             self._set_cursor_state(VoiceState.SPEAKING)
             spoke = self._speak(reply.speech)
             self.voice_thread.suppress_input(0.3)
@@ -216,7 +242,10 @@ class PtyShell:
         if reply.command:
             self._set_cursor_state(VoiceState.TYPING)
         if visible_speech or reply.command:
-            self._publish_reply(visible_speech, reply.command)
+            if expected_revision is None:
+                self._publish_reply(visible_speech, reply.command)
+            else:
+                self._publish_reply(visible_speech, reply.command, expected_revision)
         self._set_cursor_state(self._resting_voice_state())
 
     def _setup_terminal(self):
@@ -283,6 +312,9 @@ class PtyShell:
         if self._exiting:
             return
         state = VoiceState(state) if state is not None else None
+        if state == VoiceState.TRANSCRIBING:
+            with self._input_lock:
+                self._voice_input_revision = self._input_revision
         if state in (VoiceState.TRANSCRIBING, VoiceState.THINKING, VoiceState.TYPING, VoiceState.SPEAKING):
             if hasattr(self, "voice_thread"):
                 self.voice_thread.set_processing(True)
@@ -327,7 +359,15 @@ class PtyShell:
     def _toggle_listening(self):
         if self._exiting:
             return
-        enabled = self.voice_thread.toggle_listening()
+        was_listening = self.voice_thread.is_listening
+        try:
+            enabled = self.voice_thread.toggle_listening()
+        except OSError as error:
+            logger.error(f"Failed to acquire microphone: {error}")
+            return
+        if not was_listening and not enabled:
+            logger.warning("Microphone is already in use by another VSH session")
+            return
         if enabled:
             self.voice_thread.suppress_input(0.6)
         if self.verbose:
@@ -341,24 +381,35 @@ class PtyShell:
         if enabled and not self._exiting:
             sys.stdout.buffer.write(b"\a")
 
-    def _inject_command(self, cmd: str):
+    def _inject_command(self, cmd: str, expected_revision: int | None = None) -> bool:
         """Send text directly to the shell."""
         if not cmd or self._exiting:
-            return
+            return False
 
         if getattr(self.config.shell, "auto_submit", False) and not cmd.endswith("\n"):
             cmd += "\n"
 
         if self.master_fd is None:
             logger.error("Failed to write to PTY: master_fd is None")
-            return
+            return False
 
-        try:
-            os.write(self.master_fd, cmd.encode())
-        except OSError as e:
-            logger.error(f"Failed to write to PTY: {e}")
+        with self._input_lock:
+            if expected_revision is not None:
+                try:
+                    foreground = os.tcgetpgrp(self.master_fd)
+                except OSError:
+                    foreground = None
+                if expected_revision != self._input_revision or foreground != self.shell_pid:
+                    logger.warning("Skipped voice command because terminal input or ownership changed")
+                    return False
+            try:
+                os.write(self.master_fd, cmd.encode())
+                return True
+            except OSError as e:
+                logger.error(f"Failed to write to PTY: {e}")
+                return False
 
-    def _publish_reply(self, speech: str, command: str):
+    def _publish_reply(self, speech: str, command: str, expected_revision: int | None = None):
         """Publish speech and command as one ordered terminal update."""
         if self._exiting:
             return
@@ -366,7 +417,16 @@ class PtyShell:
             sys.stdout.write(f"\r\n{speech.rstrip()}\r\n")
             sys.stdout.flush()
         if command:
-            self._inject_command(command)
+            if expected_revision is None:
+                self._inject_command(command)
+            else:
+                self._inject_command(command, expected_revision)
+
+    def _cancel_processors(self):
+        for processor in (self.voice_handler, self.thinker):
+            cancel = getattr(processor, "cancel", None)
+            if cancel is not None:
+                cancel()
 
     def output_snapshot(self) -> bytes:
         with self._history_lock:
@@ -448,17 +508,6 @@ class PtyShell:
                 if self._exiting:
                     return
                 try:
-                    if self.tts_provider is None and self.config.tts.provider not in ("", "none"):
-                        from vsh.providers import resolve_tts
-
-                        try:
-                            self.tts_provider = resolve_tts(self.config)
-                        except Exception as error:
-                            logger.error(f"Failed to load TTS '{self.config.tts.provider}': {error}")
-                        if not self.tts_provider:
-                            logger.warning(f"Unknown or failed TTS provider: {self.config.tts.provider}")
-                    if self._exiting:
-                        return
                     self.mic_monitor.start()
                     if self._exiting:
                         self.mic_monitor.stop()
@@ -485,6 +534,7 @@ class PtyShell:
                 self._io_loop()
             finally:
                 self._exiting = True
+                self._cancel_processors()
                 if self.http_server is not None:
                     try:
                         self.http_server.shutdown()
@@ -559,10 +609,12 @@ class PtyShell:
 
             if data:
                 self._user_started_typing()
-                try:
-                    os.write(self.master_fd, data)
-                except OSError:
-                    break
+                with self._input_lock:
+                    try:
+                        os.write(self.master_fd, data)
+                        self._input_revision += 1
+                    except OSError:
+                        break
 
             if self.master_fd in ready_r:
                 try:

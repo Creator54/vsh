@@ -1,6 +1,10 @@
+import fcntl
+import os
 import threading
 
 import numpy as np
+
+from vsh.core.logger import logger
 
 
 class SupertonicTTSProvider:
@@ -13,27 +17,36 @@ class SupertonicTTSProvider:
         self.voice_style = None
         self._lock = threading.Lock()
 
-        threading.Thread(target=self._bg_load, daemon=True).start()
-
-    def _bg_load(self):
+    def _load(self):
         from supertonic import TTS
+        from supertonic.loader import download_model, get_cache_dir, has_all_onnx_modules
 
-        with self._lock:
-            engine = TTS(auto_download=True)
-            self.voice_style = engine.get_voice_style(voice_name=self.voice)
-            self.engine = engine
+        model_dir = get_cache_dir()
+        if has_all_onnx_modules(model_dir):
+            engine = TTS(auto_download=False)
+        else:
+            lock_path = model_dir.parent / f".{model_dir.name}.vsh.lock"
+            with lock_path.open("a+") as lock:
+                os.chmod(lock_path, 0o600)
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    logger.info("Waiting for another VSH session to install the Supertonic model...")
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                if not has_all_onnx_modules(model_dir):
+                    download_model(model_dir)
+            engine = TTS(auto_download=False)
+        self.voice_style = engine.get_voice_style(voice_name=self.voice)
+        self.sample_rate = engine.sample_rate
+        self.engine = engine
 
     def synthesize(self, text: str) -> np.ndarray:
         with self._lock:
-            engine = self.engine
-            voice_style = self.voice_style
+            if self.engine is None:
+                self._load()
 
-        if not engine:
-            from supertonic import TTS
-
-            engine = TTS(auto_download=True)
-            voice_style = engine.get_voice_style(voice_name=self.voice)
-
-        # Eight steps balance quality and speed.
-        wav, _ = engine.synthesize(text=text, voice_style=voice_style, total_steps=8, speed=1.0, lang="en")
+            # Eight steps balance quality and speed.
+            wav, _ = self.engine.synthesize(
+                text=text, voice_style=self.voice_style, total_steps=8, speed=1.0, lang="en"
+            )
         return wav.flatten()
