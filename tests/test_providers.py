@@ -1,7 +1,10 @@
 import base64
+import fcntl
+import multiprocessing
 import tempfile
 import unittest
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -13,6 +16,27 @@ from vsh.providers.http_audio import HttpSTTProvider, HttpTTSProvider
 from vsh.providers.polly import AwsPollyTTSProvider
 from vsh.providers.sarvam import SarvamTTSProvider
 from vsh.providers.supertonic import SupertonicTTSProvider
+
+
+def _wait_for_vosk_model(model_path: str, results):
+    from vsh.providers.vosk import VoskSTTProvider
+
+    provider = VoskSTTProvider.__new__(VoskSTTProvider)
+    provider.model_name = Path(model_path).name
+    lock_path = Path(model_path).with_name(f".{Path(model_path).name}.lock")
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            results.put("waiting")
+        else:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            results.put("not-waiting")
+    try:
+        provider._ensure_model(model_path, None)
+        results.put("ok")
+    except Exception as error:
+        results.put(type(error).__name__)
 
 
 class TestProviders(unittest.TestCase):
@@ -103,18 +127,17 @@ class TestProviders(unittest.TestCase):
     def test_vosk_provider_requires_url_when_model_path_missing(self):
         from vsh.providers.vosk import VoskSTTProvider
 
-        with (
-            patch("os.path.exists", return_value=False),
-            self.assertRaises(ValueError) as ctx,
-        ):
-            VoskSTTProvider(model_name="nonexistent-model", model_url="")
+        with tempfile.TemporaryDirectory() as home, patch("pathlib.Path.home", return_value=Path(home)):
+            with self.assertRaises(ValueError) as ctx:
+                VoskSTTProvider(model_name="nonexistent-model", model_url="")
         self.assertIn("no download URL is configured", str(ctx.exception))
 
     @patch("vsh.providers.vosk.Model")
     def test_vosk_provider_loads_existing_local_model(self, mock_model_cls):
         from vsh.providers.vosk import VoskSTTProvider
 
-        with patch("os.path.exists", return_value=True):
+        with tempfile.TemporaryDirectory() as home, patch("pathlib.Path.home", return_value=Path(home)):
+            (Path(home) / ".local/share/vsh/models/installed-model").mkdir(parents=True)
             provider = VoskSTTProvider(model_name="installed-model")
             self.assertEqual(provider.model_name, "installed-model")
             mock_model_cls.assert_called_once()
@@ -130,14 +153,79 @@ class TestProviders(unittest.TestCase):
         provider.model_name = "model"
 
         with tempfile.TemporaryDirectory() as temp_dir:
+
+            def unpack(_archive, destination):
+                (Path(destination) / "model").mkdir()
+
             with (
                 patch("urllib.request.urlopen", return_value=response) as urlopen,
-                patch("shutil.unpack_archive"),
+                patch("shutil.unpack_archive", side_effect=unpack),
             ):
                 provider._ensure_model(f"{temp_dir}/model", "https://example.test/model.zip")
 
         self.assertNotIn("context", urlopen.call_args.kwargs)
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 30)
+
+    def test_parallel_vosk_initialization_waits_and_reuses_completed_model(self):
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = Path(temp_dir)
+            model_path = parent / "model"
+            lock_path = parent / ".model.lock"
+            results = context.Queue()
+
+            with lock_path.open("a+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                process = context.Process(target=_wait_for_vosk_model, args=(str(model_path), results))
+                process.start()
+                self.assertEqual(results.get(timeout=5), "waiting")
+                model_path.mkdir()
+                (model_path / "ready").write_text("ok")
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+            process.join(2)
+            self.assertEqual(process.exitcode, 0)
+            self.assertEqual(results.get(timeout=1), "ok")
+            self.assertEqual((model_path / "ready").read_text(), "ok")
+
+    def test_failed_vosk_install_is_not_published_and_can_retry(self):
+        from vsh.providers.vosk import VoskSTTProvider
+
+        provider = VoskSTTProvider.__new__(VoskSTTProvider)
+        provider.model_name = "model"
+        response = MagicMock(headers={})
+        response.read.return_value = b""
+        response.__enter__.return_value = response
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path = Path(temp_dir) / "model"
+
+            def fail_after_partial_extract(_archive, destination):
+                (Path(destination) / "model").mkdir()
+                raise ValueError("broken archive")
+
+            with (
+                patch("urllib.request.urlopen", return_value=response),
+                patch("shutil.unpack_archive", side_effect=fail_after_partial_extract),
+                self.assertRaisesRegex(ValueError, "broken archive"),
+            ):
+                provider._ensure_model(model_path, "https://example.test/model.zip")
+
+            self.assertFalse(model_path.exists())
+            self.assertFalse((Path(temp_dir) / ".model.installing").exists())
+
+            def unpack(_archive, destination):
+                staged = Path(destination) / "model"
+                staged.mkdir()
+                (staged / "ready").write_text("ok")
+
+            with (
+                patch("urllib.request.urlopen", return_value=response),
+                patch("shutil.unpack_archive", side_effect=unpack),
+            ):
+                provider._ensure_model(model_path, "https://example.test/model.zip")
+
+            self.assertEqual((model_path / "ready").read_text(), "ok")
 
 
 if __name__ == "__main__":

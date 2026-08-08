@@ -5,20 +5,17 @@ import os
 import pty
 import queue
 import re
-import secrets
 import select
 import signal
 import struct
 import sys
 import termios
 import threading
-import time
 import tty
 from dataclasses import dataclass
 
-from vsh.core.logger import logger
-
 from vsh.core.config import VshConfig
+from vsh.core.logger import logger
 from vsh.core.mic_state import PipeWireMicMonitor
 from vsh.core.voice_indicator import CURSOR_RESET as CURSOR_RESET
 from vsh.core.voice_indicator import VoiceIndicator
@@ -83,14 +80,6 @@ def _voice_prompt(transcript: str, mode: str) -> str:
     )
 
 
-def _get_vsh_runtime_dir() -> str:
-    base = os.environ.get("XDG_RUNTIME_DIR")
-    runtime = os.path.join(base, "vsh") if base else os.path.expanduser("~/.vsh/run")
-    os.makedirs(runtime, mode=0o700, exist_ok=True)
-    os.chmod(runtime, 0o700)
-    return runtime
-
-
 class PtyShell:
     def __init__(
         self,
@@ -99,12 +88,18 @@ class PtyShell:
         verbose: bool = False,
         tts_provider=None,
         voice_handler=None,
+        server_port: int | None = None,
     ):
         self.config = config
         self.thinker = thinker
         self.verbose = verbose
         self.tts_provider = tts_provider
         self.voice_handler = voice_handler
+        self.server_port = server_port
+        self.http_server = None
+
+        if self.config.shell.response_bridge:
+            logger.warning("response_bridge is deprecated and ignored; replies now use the PTY directly")
 
         k = self.config.keybinds.toggle_listen.lower()
         self.triggers = []
@@ -165,11 +160,7 @@ class PtyShell:
         self.shell_name = os.path.basename(self.inner_shell)
         self.shell_pid = None
         self.shell_state = "starting"
-        self._exec_lock = threading.Lock()
-        self._cap_lock = threading.Lock()
-        self._cap_event = threading.Event()
-        self._cap_buf = None
-
+        self._history_lock = threading.Lock()
         self.output_history = collections.deque(maxlen=2000)
 
     def _pipeline_worker(self):
@@ -266,6 +257,8 @@ class PtyShell:
             pass
 
     def _volume_callback(self, energy: int, threshold: int):
+        if self._exiting:
+            return
         self.indicator.update_volume(energy, threshold)
 
     def _resting_voice_state(self) -> VoiceState | None:
@@ -287,6 +280,8 @@ class PtyShell:
 
     def _set_cursor_state(self, state: VoiceState | str | None):
         """Update pipeline state and its visual indicator."""
+        if self._exiting:
+            return
         state = VoiceState(state) if state is not None else None
         if state in (VoiceState.TRANSCRIBING, VoiceState.THINKING, VoiceState.TYPING, VoiceState.SPEAKING):
             if hasattr(self, "voice_thread"):
@@ -299,6 +294,8 @@ class PtyShell:
         self.indicator.render(self._effective_cursor_state())
 
     def _set_system_mic_muted(self, muted: bool | None):
+        if self._exiting:
+            return
         self._system_mic_muted = muted
         if hasattr(self, "voice_thread"):
             self.voice_thread.set_system_mic_muted(muted)
@@ -323,11 +320,13 @@ class PtyShell:
 
     def _notify(self, msg: str, color="36"):
         """Verbose notification for startup and toggle diagnostics."""
-        if self.verbose:
+        if self.verbose and not self._exiting:
             sys.stdout.buffer.write(f"\r\n\033[{color}m◆\033[0m {msg}\r\n".encode())
             sys.stdout.buffer.flush()
 
     def _toggle_listening(self):
+        if self._exiting:
+            return
         enabled = self.voice_thread.toggle_listening()
         if enabled:
             self.voice_thread.suppress_input(0.6)
@@ -339,12 +338,12 @@ class PtyShell:
             )
             c = "1;35" if enabled else "36"
             self._notify(m, color=c)
-        if enabled:
+        if enabled and not self._exiting:
             sys.stdout.buffer.write(b"\a")
 
     def _inject_command(self, cmd: str):
         """Send text directly to the shell."""
-        if not cmd:
+        if not cmd or self._exiting:
             return
 
         if getattr(self.config.shell, "auto_submit", False) and not cmd.endswith("\n"):
@@ -359,46 +358,66 @@ class PtyShell:
         except OSError as e:
             logger.error(f"Failed to write to PTY: {e}")
 
-    @staticmethod
-    def _write_bridge_file(path: str, content: str):
-        pending = f"{path}.{secrets.token_hex(4)}.tmp"
-        with open(pending, "x", encoding="utf-8") as stream:
-            stream.write(content)
-        os.chmod(pending, 0o600)
-        os.replace(pending, path)
-
     def _publish_reply(self, speech: str, command: str):
         """Publish speech and command as one ordered terminal update."""
-        is_fish = self.shell_name.lower().rsplit("-", 1)[-1] == "fish"
-        use_signal_bridge = (
-            self.config.shell.response_bridge == "fish-signal" and is_fish
-        ) or self.config.shell.response_bridge in ("signal", "ipc")
-        if use_signal_bridge and self.shell_pid:
-            runtime = _get_vsh_runtime_dir()
-            paths = {
-                "response": os.path.join(runtime, f"{self.shell_pid}.response"),
-                "command": os.path.join(runtime, f"{self.shell_pid}.command"),
-                "submit": os.path.join(runtime, f"{self.shell_pid}.submit"),
-            }
-            for path in paths.values():
-                try:
-                    os.unlink(path)
-                except FileNotFoundError:
-                    pass
-            if speech:
-                self._write_bridge_file(paths["response"], speech.rstrip() + "\n")
-            if command:
-                self._write_bridge_file(paths["command"], command)
-                if self.config.shell.auto_submit:
-                    self._write_bridge_file(paths["submit"], "1\n")
-            os.kill(self.shell_pid, signal.SIGUSR1)
+        if self._exiting:
             return
-
         if speech:
             sys.stdout.write(f"\r\n{speech.rstrip()}\r\n")
             sys.stdout.flush()
         if command:
             self._inject_command(command)
+
+    def output_snapshot(self) -> bytes:
+        with self._history_lock:
+            return b"".join(self.output_history)
+
+    def _reap_shell(self):
+        pid = self.shell_pid
+        if not pid:
+            return
+        while True:
+            try:
+                waited, _ = os.waitpid(pid, os.WNOHANG)
+                if waited == pid:
+                    return
+                break
+            except InterruptedError:
+                continue
+            except (ChildProcessError, OSError):
+                return
+
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+
+        while True:
+            try:
+                os.waitpid(pid, 0)
+                return
+            except InterruptedError:
+                continue
+            except (ChildProcessError, OSError):
+                return
+
+    def _start_http_server(self):
+        if self.server_port is None or self._exiting:
+            return
+        try:
+            from vsh.core.server import serve
+
+            self.http_server = serve(self, port=self.server_port)
+            if self.http_server is not None:
+                host, port = self.http_server.server_address
+                logger.success(
+                    f"HTTP bridge · http://{host}:{port} · Authorization: Bearer {self.http_server.auth_token}"
+                )
+        except Exception as error:
+            logger.error(f"Shell bridge failed: {error}")
 
     def run(self):
         """Start the shell, background workers, and input/output loop."""
@@ -423,13 +442,31 @@ class PtyShell:
 
             self._setup_terminal()
             self.indicator.select_mode(self.old_tty_attrs is not None)
+            self._start_http_server()
 
             def async_bg_init():
                 if self._exiting:
                     return
                 try:
+                    if self.tts_provider is None and self.config.tts.provider not in ("", "none"):
+                        from vsh.providers import resolve_tts
+
+                        try:
+                            self.tts_provider = resolve_tts(self.config)
+                        except Exception as error:
+                            logger.error(f"Failed to load TTS '{self.config.tts.provider}': {error}")
+                        if not self.tts_provider:
+                            logger.warning(f"Unknown or failed TTS provider: {self.config.tts.provider}")
+                    if self._exiting:
+                        return
                     self.mic_monitor.start()
+                    if self._exiting:
+                        self.mic_monitor.stop()
+                        return
                     self.voice_thread.start()
+                    if self._exiting:
+                        self.voice_thread.stop()
+                        return
                     self.pipeline_thread = threading.Thread(target=self._pipeline_worker, daemon=True)
                     self.pipeline_thread.start()
                     self.shell_state = "idle"
@@ -437,27 +474,31 @@ class PtyShell:
                         self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} or Ctrl+G to toggle.")
                     if self.config.shell.voice_on_start and not self._exiting:
                         self._toggle_listening()
-                except Exception:
-                    pass
+                except Exception as error:
+                    if not self._exiting:
+                        logger.error(f"Background initialization failed: {error}")
 
-            threading.Thread(target=async_bg_init, daemon=True).start()
+            self.background_thread = threading.Thread(target=async_bg_init, daemon=True)
+            self.background_thread.start()
 
             try:
                 self._io_loop()
             finally:
                 self._exiting = True
-                self._restore_terminal()
-                if self.master_fd is not None:
+                if self.http_server is not None:
                     try:
-                        os.close(self.master_fd)
+                        self.http_server.shutdown()
                     except OSError:
                         pass
-                    self.master_fd = None
+                    try:
+                        self.http_server.server_close()
+                    except OSError:
+                        pass
+                    self.http_server = None
                 try:
                     self.stt_queue.put_nowait(None)
                 except Exception:
                     pass
-                self._cleanup_ipc_files()
                 try:
                     self.mic_monitor.stop()
                 except Exception:
@@ -466,83 +507,14 @@ class PtyShell:
                     self.voice_thread.stop()
                 except Exception:
                     pass
-                if self.shell_pid:
+                self._restore_terminal()
+                if self.master_fd is not None:
                     try:
-                        try:
-                            pgid = os.getpgid(self.shell_pid)
-                            os.killpg(pgid, signal.SIGKILL)
-                        except (OSError, ProcessLookupError):
-                            try:
-                                os.kill(self.shell_pid, signal.SIGKILL)
-                            except (OSError, ProcessLookupError):
-                                pass
-                        os.waitpid(self.shell_pid, os.WNOHANG)
-                    except (ChildProcessError, ProcessLookupError, OSError):
+                        os.close(self.master_fd)
+                    except OSError:
                         pass
-
-    def _cleanup_ipc_files(self):
-        if not self.shell_pid:
-            return
-        runtime = _get_vsh_runtime_dir()
-        for suffix in ("response", "command", "submit"):
-            path = os.path.join(runtime, f"{self.shell_pid}.{suffix}")
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
-    def exec_command(self, command: str, timeout: float = 120.0):
-        """Run a command in the live shell and return its output and exit code.
-
-        Raises RuntimeError when the shell is already running another command.
-        """
-        if not command.strip():
-            raise ValueError("command must be a non-empty string")
-        if not self._exec_lock.acquire(blocking=False):
-            raise RuntimeError("shell busy")
-        try:
-            self.shell_state = "busy"
-            with self._cap_lock:
-                self._cap_buf = bytearray()
-            self._cap_event.clear()
-
-            if self.master_fd is None:
-                raise RuntimeError("PTY shell master_fd is not initialized")
-
-            marker_id = secrets.token_hex(16)
-            start_marker = f"__VSH_START_{marker_id}__"
-            end_marker = f"__VSH_END_{marker_id}__"
-            status = "$status" if self.shell_name.lower().rsplit("-", 1)[-1] == "fish" else '"$?"'
-            payload = f"printf '\\n{start_marker}\\n'\n{command.rstrip()}\nprintf '\\n{end_marker}:%s\\n' {status}\n"
-            os.write(self.master_fd, payload.encode())
-
-            deadline = time.monotonic() + timeout
-            end_match = None
-            clean_output = ""
-            while time.monotonic() < deadline:
-                with self._cap_lock:
-                    raw = bytes(self._cap_buf or b"")
-                clean_output = _clean_output(raw)
-                end_match = re.search(rf"(?:^|\n){re.escape(end_marker)}:(\d+)\r?(?:\n|$)", clean_output)
-                if end_match:
-                    break
-                self._cap_event.wait(min(0.1, max(0.0, deadline - time.monotonic())))
-                self._cap_event.clear()
-
-            if end_match is None:
-                raise TimeoutError(f"command did not complete within {timeout:g} seconds")
-
-            start_match = re.search(rf"(?:^|\n){re.escape(start_marker)}\r?\n", clean_output)
-            if start_match is None or start_match.end() > end_match.start():
-                raise RuntimeError("command output start marker was not received")
-
-            output = clean_output[start_match.end() : end_match.start()].replace("\r", "").strip()
-            return output, int(end_match.group(1))
-        finally:
-            self.shell_state = "idle"
-            with self._cap_lock:
-                self._cap_buf = None
-            self._exec_lock.release()
+                    self.master_fd = None
+                self._reap_shell()
 
     def _io_loop(self):
         """Relay keyboard input and shell output."""
@@ -601,11 +573,8 @@ class PtyShell:
                 if not data:
                     break
 
-                self.output_history.append(data)
-                with self._cap_lock:
-                    if self._cap_buf is not None:
-                        self._cap_buf.extend(data)
-                        self._cap_event.set()
+                with self._history_lock:
+                    self.output_history.append(data)
                 self._track_pty_controls(data)
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()

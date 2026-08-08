@@ -1,6 +1,7 @@
+import os
 import shlex
+import signal
 import subprocess
-from typing import Any
 
 
 class CliThinker:
@@ -21,20 +22,25 @@ class CliThinker:
                 cmd = cmd.replace("{}", shlex.quote(prompt))
                 stdin_input = None
 
-            options: dict[str, Any] = {
-                "capture_output": True,
-                "text": True,
-                "timeout": self.timeout,
-            }
-            if stdin_input is None:
-                options["stdin"] = subprocess.DEVNULL
-            else:
-                options["input"] = stdin_input
-
-            result = subprocess.run(cmd, shell=True, **options)
-            return (result.stdout or result.stderr or "").strip()
-        except subprocess.TimeoutExpired:
-            return "echo 'Command timed out'\n"
+            process = subprocess.Popen(
+                cmd,
+                shell=True,
+                stdin=subprocess.PIPE if stdin_input is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = process.communicate(input=stdin_input, timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                return "echo 'Command timed out'\n"
+            return (stdout or stderr or "").strip()
         except FileNotFoundError:
             return f"echo {shlex.quote('Command not found: ' + self.command)}\n"
         except subprocess.SubprocessError as e:

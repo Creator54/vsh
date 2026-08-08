@@ -1,7 +1,6 @@
 import http.client
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 from vsh.core.server import health_payload
 
@@ -53,7 +52,7 @@ def test_server_port_fallback_when_initial_port_busy():
         srv1.server_close()
 
 
-def test_execute_tool_requires_bearer_token():
+def test_execute_tool_is_authenticated_and_disabled():
     from vsh.core.server import serve
 
     shell = SimpleNamespace(
@@ -61,13 +60,12 @@ def test_execute_tool_requires_bearer_token():
         shell_pid=1234,
         shell_state="idle",
         voice_status=lambda: {},
-        output_history=[],
-        exec_command=MagicMock(return_value=("ok", 0)),
+        output_snapshot=lambda: b"",
     )
     server = serve(shell, host="127.0.0.1", port=0, token="test-secret")
     assert server is not None
     connection = http.client.HTTPConnection(*server.server_address)
-    body = json.dumps({"arg": {"command": "pwd"}})
+    body = '{"arg":{"command":"pwd"}}'
     try:
         connection.request("POST", "/execute_tool", body=body, headers={"Content-Type": "application/json"})
         response = connection.getresponse()
@@ -81,9 +79,37 @@ def test_execute_tool_requires_bearer_token():
             headers={"Content-Type": "application/json", "Authorization": "Bearer test-secret"},
         )
         response = connection.getresponse()
+        assert response.status == 410
+        assert response.read() == b'{"error": "live shell execution is disabled"}'
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_read_only_endpoints_expose_no_tools_and_snapshot_output():
+    from vsh.core.server import serve
+
+    shell = SimpleNamespace(
+        shell_name="fish",
+        shell_pid=1234,
+        shell_state="idle",
+        voice_status=lambda: {},
+        output_snapshot=lambda: b"\x1b[32mready\x1b[0m\n",
+    )
+    server = serve(shell, host="127.0.0.1", port=0, token="test-secret")
+    connection = http.client.HTTPConnection(*server.server_address)
+    headers = {"Authorization": "Bearer test-secret"}
+    try:
+        connection.request("GET", "/tools", headers=headers)
+        response = connection.getresponse()
         assert response.status == 200
-        assert json.loads(response.read())["exit_code"] == 0
-        shell.exec_command.assert_called_once_with("pwd")
+        assert json.loads(response.read()) == {"instance_id": "vsh:fish", "tools": []}
+
+        connection.request("GET", "/io/output", headers=headers)
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read()) == {"output": "ready\n"}
     finally:
         connection.close()
         server.shutdown()

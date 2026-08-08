@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import MagicMock, patch
 
 from vsh.core.mic_state import JsonStreamDecoder, PipeWireMicMonitor, PipeWireState
@@ -119,3 +120,44 @@ def test_pipewire_monitor_ignores_stdout_closed_during_stop():
     process.poll.return_value = 0
     with patch("vsh.core.mic_state.subprocess.Popen", return_value=process):
         monitor.run()
+
+
+def test_pipewire_monitor_stop_catches_process_published_after_stop():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Process:
+        stdout = iter(())
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            self.returncode = self.returncode or 0
+            return self.returncode
+
+    process = Process()
+
+    def delayed_popen(*_args, **_kwargs):
+        entered.set()
+        release.wait()
+        return process
+
+    with patch("vsh.core.mic_state.shutil.which", return_value="/bin/pw-dump"):
+        monitor = PipeWireMicMonitor(lambda _state: None)
+    with patch("vsh.core.mic_state.subprocess.Popen", side_effect=delayed_popen):
+        monitor.start()
+        assert entered.wait(1)
+        monitor.stop()
+        release.set()
+        monitor.join(1)
+
+    assert not monitor.is_alive()
+    assert process.returncode is not None

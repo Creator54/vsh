@@ -1,8 +1,12 @@
+import contextlib
+import fcntl
 import json
 import os
 import re
 import shutil
+import stat
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -104,6 +108,39 @@ def get_default_rc(shell_path: str) -> str:
     return "~/.bashrc"
 
 
+@contextlib.contextmanager
+def _locked_file(path: Path):
+    target = path.resolve()
+    lock_path = target.with_name(f"{target.name}.vsh.lock")
+    with lock_path.open("a+") as lock:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield target
+
+
+def _atomic_write_text(path: Path, content: str, default_mode: int = 0o600) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else default_mode
+    fd, pending = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
+    pending_path = Path(pending)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(pending_path, mode)
+        os.replace(pending_path, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            pending_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: bool) -> bool:
     rc_path = Path(rc_file).expanduser()
     rc_name = os.path.basename(rc_file).lower()
@@ -150,19 +187,16 @@ def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: b
     block = f"\n{block_start}\n{append_cmd}{block_end}\n"
 
     try:
-        content = ""
-        if rc_path.exists():
-            content = rc_path.read_text()
-
-        pattern = re.compile(f"\\n?{block_start}.*?{block_end}\\n?", re.DOTALL)
-        if pattern.search(content):
-            new_content = pattern.sub(lambda _: block, content)
-        elif set_default:
-            new_content = block.lstrip() + ("\n" + content.lstrip() if content else "")
-        else:
-            new_content = content.rstrip() + block
-
-        rc_path.write_text(new_content)
+        with _locked_file(rc_path) as target:
+            content = target.read_text() if target.exists() else ""
+            pattern = re.compile(f"\\n?{block_start}.*?{block_end}\\n?", re.DOTALL)
+            if pattern.search(content):
+                new_content = pattern.sub(lambda _: block, content)
+            elif set_default:
+                new_content = block.lstrip() + ("\n" + content.lstrip() if content else "")
+            else:
+                new_content = content.rstrip() + block
+            _atomic_write_text(target, new_content, default_mode=0o644)
         if keybind_data:
             sys.stdout.write(f"\nAdded shortcut {keybind_data['name']} to {rc_file}!\n")
         if set_default:
@@ -211,44 +245,45 @@ def _dump_toml(data: dict) -> str:
 
 def update_keybind_config(config_path: Path, keybind_data: dict) -> None:
     """Update only the keybind table, preserving the rest of the file."""
-    with config_path.open("rb") as stream:
-        data = tomllib.load(stream)
+    with _locked_file(config_path) as target:
+        with target.open("rb") as stream:
+            data = tomllib.load(stream)
 
-    keybinds = dict(data.get("keybinds", {}))
-    keybinds["toggle_listen"] = keybind_data["name"]
-    keybinds["toggle_listen_triggers"] = keybind_data["triggers"]
+        keybinds = dict(data.get("keybinds", {}))
+        keybinds["toggle_listen"] = keybind_data["name"]
+        keybinds["toggle_listen_triggers"] = keybind_data["triggers"]
 
-    lines = config_path.read_text().splitlines()
-    output = []
-    index = 0
-    in_keybinds = False
-    replaced = False
-    while index < len(lines):
-        line = lines[index]
-        stripped = line.strip()
-        if stripped == "[keybinds]":
+        lines = target.read_text().splitlines()
+        output = []
+        index = 0
+        in_keybinds = False
+        replaced = False
+        while index < len(lines):
+            line = lines[index]
+            stripped = line.strip()
+            if stripped == "[keybinds]":
+                output.append("[keybinds]")
+                output.extend(f"{key} = {_toml_value(value)}" for key, value in keybinds.items())
+                replaced = True
+                in_keybinds = True
+                index += 1
+                continue
+            if in_keybinds:
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    in_keybinds = False
+                    output.append(line)
+                index += 1
+                continue
+            output.append(line)
+            index += 1
+
+        if not replaced:
+            if output and output[-1].strip():
+                output.append("")
             output.append("[keybinds]")
             output.extend(f"{key} = {_toml_value(value)}" for key, value in keybinds.items())
-            replaced = True
-            in_keybinds = True
-            index += 1
-            continue
-        if in_keybinds:
-            if stripped.startswith("[") and stripped.endswith("]"):
-                in_keybinds = False
-                output.append(line)
-            index += 1
-            continue
-        output.append(line)
-        index += 1
 
-    if not replaced:
-        if output and output[-1].strip():
-            output.append("")
-        output.append("[keybinds]")
-        output.extend(f"{key} = {_toml_value(value)}" for key, value in keybinds.items())
-
-    config_path.write_text("\n".join(output) + "\n")
+        _atomic_write_text(target, "\n".join(output) + "\n")
 
 
 def interactive_setup(section: str | None = None) -> None:
@@ -529,77 +564,96 @@ def interactive_setup(section: str | None = None) -> None:
             rc_file = inquirer.text(message="Shell config file to update:", default=default_rc).execute()
             update_shell_rc_bind(rc_file, keybind_data if add_shortcut else None, set_default)
 
-    def table(name: str) -> dict:
-        value = existing.get(name)
-        if not isinstance(value, dict):
-            value = {}
-            existing[name] = value
-        return value
+    def apply_updates(data: dict) -> None:
+        def table(name: str) -> dict:
+            value = data.get(name)
+            if not isinstance(value, dict):
+                value = {}
+                data[name] = value
+            return value
 
-    table("shell").update(
-        {
-            "inner_shell": inner_shell,
-            "voice_on_start": voice_on_start,
-            "auto_submit": auto_submit,
-        }
-    )
-    table("keybinds").update(
-        {
-            "toggle_listen": keybind_data["name"],
-            "toggle_listen_triggers": keybind_data["triggers"],
-        }
-    )
+        if section in (None, "core", "shell"):
+            table("shell").update(
+                {
+                    "inner_shell": inner_shell,
+                    "voice_on_start": voice_on_start,
+                    "auto_submit": auto_submit,
+                }
+            )
 
-    stt = table("stt")
-    stt["provider"] = "custom_http" if stt_provider == "groq" else stt_provider
-    if stt_provider in ("custom_http", "groq"):
-        stt.update({"type": "http", **stt_http})
-    elif stt_provider == "sarvam":
-        stt["api_key_env"] = stt_http["api_key_env"]
-    elif stt_provider == "vosk" and vosk_model_name:
-        stt.update({"model": vosk_model_name, "url": vosk_model_url})
-    if device_index is None:
-        stt.pop("device_index", None)
-    else:
-        stt["device_index"] = device_index
+        if section in (None, "keybind", "keybinds"):
+            table("keybinds").update(
+                {
+                    "toggle_listen": keybind_data["name"],
+                    "toggle_listen_triggers": keybind_data["triggers"],
+                }
+            )
 
-    tts = table("tts")
-    tts["provider"] = tts_provider
-    if tts_provider == "custom_http":
-        tts.update({"type": "http", **tts_http})
-    elif tts_provider == "sarvam":
-        tts["api_key_env"] = tts_http["api_key_env"]
-        if tts_http.get("model"):
-            tts["model"] = tts_http["model"]
-    elif tts_provider == "polly" and tts_http.get("model"):
-        tts["model"] = tts_http["model"]
+        if section in (None, "stt", "voice"):
+            stt = table("stt")
+            stt["provider"] = "custom_http" if stt_provider == "groq" else stt_provider
+            if stt_provider in ("custom_http", "groq"):
+                stt.update({"type": "http", **stt_http})
+            elif stt_provider == "sarvam":
+                stt["api_key_env"] = stt_http["api_key_env"]
+            elif stt_provider == "vosk" and vosk_model_name:
+                stt.update({"model": vosk_model_name, "url": vosk_model_url})
 
-    llm = table("llm")
-    llm["provider"] = thinker
-    llm["output_mode"] = output_mode
-    if thinker == "custom_http":
-        profile = llm.get("custom_http")
-        if not isinstance(profile, dict):
-            profile = {}
-            llm["custom_http"] = profile
-        profile.update(
-            {
-                "type": "http",
-                "endpoint": endpoint,
-                "api_key_env": api_key_env,
-                "format": "openai",
-                "model": model,
-            }
-        )
-    elif thinker == "custom_cli":
-        profile = llm.get("custom_cli")
-        if not isinstance(profile, dict):
-            profile = {}
-            llm["custom_cli"] = profile
-        profile.update({"type": "cli", "command": cli_cmd})
-    elif thinker == "ollama" and model:
-        llm["model"] = model
+        if section in (None, "device"):
+            stt = table("stt")
+            if device_index is None:
+                stt.pop("device_index", None)
+            else:
+                stt["device_index"] = device_index
+
+        if section in (None, "tts", "voice"):
+            tts = table("tts")
+            tts["provider"] = tts_provider
+            if tts_provider == "custom_http":
+                tts.update({"type": "http", **tts_http})
+            elif tts_provider == "sarvam":
+                tts["api_key_env"] = tts_http["api_key_env"]
+                if tts_http.get("model"):
+                    tts["model"] = tts_http["model"]
+            elif tts_provider == "polly" and tts_http.get("model"):
+                tts["model"] = tts_http["model"]
+
+        if section in (None, "llm", "thinker"):
+            llm = table("llm")
+            llm["provider"] = thinker
+            llm["output_mode"] = output_mode
+            if thinker == "custom_http":
+                profile = llm.get("custom_http")
+                if not isinstance(profile, dict):
+                    profile = {}
+                    llm["custom_http"] = profile
+                profile.update(
+                    {
+                        "type": "http",
+                        "endpoint": endpoint,
+                        "api_key_env": api_key_env,
+                        "format": "openai",
+                        "model": model,
+                    }
+                )
+            elif thinker == "custom_cli":
+                profile = llm.get("custom_cli")
+                if not isinstance(profile, dict):
+                    profile = {}
+                    llm["custom_cli"] = profile
+                profile.update({"type": "cli", "command": cli_cmd})
+            elif thinker == "ollama" and model:
+                llm["model"] = model
 
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(_dump_toml(existing))
+    with _locked_file(cfg_path) as target:
+        latest = {}
+        if target.exists():
+            try:
+                with target.open("rb") as stream:
+                    latest = tomllib.load(stream)
+            except Exception:
+                pass
+        apply_updates(latest)
+        _atomic_write_text(target, _dump_toml(latest))
     sys.stdout.write(f"\nConfiguration successfully written to {cfg_path}\n")

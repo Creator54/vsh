@@ -181,36 +181,38 @@ class TestCliThinker(unittest.TestCase):
 
     def test_prompt_template_does_not_inherit_terminal_input(self):
         thinker = CliThinker(command="voice-handler {}")
-        completed = MagicMock(stdout="ok\n", stderr="")
-        with patch("subprocess.run", return_value=completed) as run:
+        process = MagicMock()
+        process.communicate.return_value = ("ok\n", "")
+        with patch("subprocess.Popen", return_value=process) as popen:
             thinker.ask("hello")
 
-        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
-        self.assertNotIn("input", run.call_args.kwargs)
+        self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        process.communicate.assert_called_once_with(input=None, timeout=15)
 
     def test_custom_timeout(self):
         thinker = CliThinker(command="echo hello", timeout=300)
-        completed = MagicMock(stdout="hello\n", stderr="")
-        with patch("subprocess.run", return_value=completed) as run:
+        process = MagicMock()
+        process.communicate.return_value = ("hello\n", "")
+        with patch("subprocess.Popen", return_value=process):
             result = thinker.ask("world")
 
         self.assertEqual(result, "hello")
-        self.assertEqual(run.call_args.kwargs["timeout"], 300)
+        process.communicate.assert_called_once_with(input="world", timeout=300)
 
     def test_timeout_fallback(self):
         thinker = CliThinker(command="sleep 5")
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="sleep 5", timeout=120)):
+        process = MagicMock(pid=4321)
+        process.communicate.side_effect = [subprocess.TimeoutExpired(cmd="sleep 5", timeout=15), ("", "")]
+        with patch("subprocess.Popen", return_value=process), patch("os.killpg") as killpg:
             result = thinker.ask("hello")
         self.assertEqual(result, "echo 'Command timed out'\n")
+        killpg.assert_called_once_with(4321, 9)
+        self.assertEqual(process.communicate.call_count, 2)
 
     def test_command_not_found(self):
         thinker_shell_false = CliThinker(command="definitely_not_a_real_command_12345")
         with patch.object(thinker_shell_false, "command", "definitely_not_a_real_command_12345"):
-            # Force shell=False by patching subprocess.run directly
-            def fake_run(*args, **kwargs):
-                raise FileNotFoundError("not found")
-
-            with patch("subprocess.run", side_effect=fake_run):
+            with patch("subprocess.Popen", side_effect=FileNotFoundError("not found")):
                 result = thinker_shell_false.ask("hello")
         self.assertTrue(result.startswith("echo 'Command not found:"))
 

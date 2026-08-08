@@ -22,8 +22,8 @@ flowchart LR
     Speech[Speech output]
     Session[VSH session]
     Shell[Interactive shell]
-    Client[External client]
-    HTTP[HTTP interface]
+    Client[Monitoring client]
+    HTTP[Read-only HTTP interface]
 
     User -->|keyboard input| Session
     User -->|voice| Voice --> Recognition --> Route
@@ -32,15 +32,14 @@ flowchart LR
     Reply -->|speech| Speech --> User
     Reply -->|command| Session
     Client -->|request| HTTP
-    HTTP -->|shell operation| Session
-    Session -->|result| HTTP
+    Session -->|status + output| HTTP
     HTTP -->|response| Client
     Session -->|shell input| Shell
     Shell -->|shell output| Session
     Session -->|terminal output| User
 ```
 
-Keyboard, voice, and HTTP commands all operate on the same live shell session.
+Keyboard and voice commands operate on the same live shell session. The optional HTTP interface only observes it.
 
 ## Installation
 
@@ -62,7 +61,7 @@ nix profile install github:creator54/vsh
   - `--voice`: start listening immediately.
   - `--verbose`: show logs.
   - `--echo`: return recognized speech without an AI.
-  - `--serve --port 8770`: expose the live shell on an authenticated, local-only web server.
+  - `--serve --port 8770`: expose authenticated, read-only shell status and output on a local-only web server.
 - `vsh setup`: configure the shell, speech and AI providers, microphone, and keybind.
 - `vsh bind`: change the VSH toggle keybind.
 - `vsh stt [--file <audio.wav>]`: transcribe the microphone or a WAV file.
@@ -87,7 +86,6 @@ nix profile install github:creator54/vsh
 - Output: `VSH_OUTPUT_MODE` (`speak_and_command`, `command_only`, or `speak_only`).
 - Visual: `VSH_OVERLAY` (`auto`, `kitty`, or `none`).
 - Voice command: `VSH_VOICE_HANDLER='command {}'`.
-- Fish replies: `VSH_RESPONSE_BRIDGE=fish-signal`.
 - HTTP bridge: `VSH_SERVER_TOKEN` sets the bearer token for `--serve`.
   - When unset, VSH generates and prints a per-instance token with the bound address.
   - Send it as `Authorization: Bearer <token>` on every bridge request.

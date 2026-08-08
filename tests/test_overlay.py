@@ -1,6 +1,4 @@
 import os
-import signal
-import stat
 import struct
 import tempfile
 import termios
@@ -404,111 +402,30 @@ class OverlayTests(unittest.TestCase):
 
         publish.assert_called_once_with("Opening it.", "cd /tmp")
 
-    def test_fish_response_bridge_writes_ordered_reply_and_signals_shell(self):
+    def test_deprecated_fish_bridge_uses_stdout_and_pty_without_signalling(self):
         shell = self._make_shell("none")
         shell.config.shell.response_bridge = "fish-signal"
         shell.config.shell.auto_submit = True
         shell.shell_name = "fish"
         shell.shell_pid = 4321
 
-        with (
-            tempfile.TemporaryDirectory() as runtime,
-            patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}),
-            patch("os.kill") as kill,
-        ):
+        with patch("sys.stdout") as stdout, patch("os.write") as write, patch("os.kill") as kill:
             shell._publish_reply("Voice response", "pwd")
-            response = Path(runtime) / "vsh" / "4321.response"
-            command = Path(runtime) / "vsh" / "4321.command"
-            submit = Path(runtime) / "vsh" / "4321.submit"
 
-            self.assertEqual(response.read_text(), "Voice response\n")
-            self.assertEqual(command.read_text(), "pwd")
-            self.assertEqual(submit.read_text(), "1\n")
-            self.assertEqual(stat.S_IMODE(response.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(command.stat().st_mode), 0o600)
-            kill.assert_called_once_with(4321, signal.SIGUSR1)
+        stdout.write.assert_called_once_with("\r\nVoice response\r\n")
+        write.assert_called_once_with(7, b"pwd\n")
+        kill.assert_not_called()
 
-    def test_fish_response_bridge_leaves_command_editable_when_auto_submit_is_off(self):
+    def test_pty_reply_leaves_command_editable_when_auto_submit_is_off(self):
         shell = self._make_shell("none")
-        shell.config.shell.response_bridge = "fish-signal"
         shell.config.shell.auto_submit = False
         shell.shell_name = "fish"
         shell.shell_pid = 4321
 
-        with (
-            tempfile.TemporaryDirectory() as runtime,
-            patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}),
-            patch("os.kill"),
-        ):
+        with patch("os.write") as write:
             shell._publish_reply("", "cd /tmp")
-            bridge = Path(runtime) / "vsh"
 
-            self.assertEqual((bridge / "4321.command").read_text(), "cd /tmp")
-            self.assertFalse((bridge / "4321.submit").exists())
-
-    def test_fish_response_bridge_falls_back_to_the_vsh_home(self):
-        shell = self._make_shell("none")
-        shell.config.shell.response_bridge = "fish-signal"
-        shell.shell_name = "fish"
-        shell.shell_pid = 4321
-
-        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}), patch("os.kill"):
-            os.environ.pop("XDG_RUNTIME_DIR", None)
-            shell._publish_reply("Voice response", "")
-
-            response = Path(home) / ".vsh" / "run" / "4321.response"
-            self.assertEqual(response.read_text(), "Voice response\n")
-
-    def test_response_bridge_uses_stdout_for_non_fish_shells(self):
-        shell = self._make_shell("none")
-        shell.config.shell.response_bridge = "fish-signal"
-        shell.shell_name = "bash"
-        shell.shell_pid = 4321
-
-        with patch("sys.stdout") as stdout, patch("os.kill") as kill:
-            shell._publish_reply("Voice response", "")
-
-        stdout.write.assert_called_once_with("\r\nVoice response\r\n")
-        kill.assert_not_called()
-
-    def test_generic_signal_response_bridge_signals_any_shell(self):
-        shell = self._make_shell("none")
-        shell.config.shell.response_bridge = "signal"
-        shell.shell_name = "bash"
-        shell.shell_pid = 4321
-
-        with (
-            tempfile.TemporaryDirectory() as runtime,
-            patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}),
-            patch("os.kill") as kill,
-        ):
-            shell._publish_reply("Voice response", "ls")
-            response = Path(runtime) / "vsh" / "4321.response"
-            command = Path(runtime) / "vsh" / "4321.command"
-
-            self.assertEqual(response.read_text(), "Voice response\n")
-            self.assertEqual(command.read_text(), "ls")
-            kill.assert_called_once_with(4321, signal.SIGUSR1)
-
-    def test_cleanup_ipc_files_unlinks_runtime_files(self):
-        shell = self._make_shell("none")
-        shell.shell_pid = 5555
-
-        with (
-            tempfile.TemporaryDirectory() as temp_dir,
-            patch.dict(os.environ, {"XDG_RUNTIME_DIR": temp_dir}),
-        ):
-            vsh_dir = Path(temp_dir) / "vsh"
-            vsh_dir.mkdir(parents=True, exist_ok=True)
-            res_file = vsh_dir / "5555.response"
-            cmd_file = vsh_dir / "5555.command"
-            res_file.write_text("reply")
-            cmd_file.write_text("ls")
-
-            shell._cleanup_ipc_files()
-
-            self.assertFalse(res_file.exists())
-            self.assertFalse(cmd_file.exists())
+        write.assert_called_once_with(7, b"cd /tmp")
 
     def test_graphics_cleanup_is_targeted(self):
         shell = self._make_shell("kitty")
@@ -540,19 +457,40 @@ class OverlayTests(unittest.TestCase):
             stdout.buffer.write.side_effect = BrokenPipeError
             shell._restore_terminal()
 
-    def test_exec_command_uses_completion_marker_and_real_exit_code(self):
+    def test_late_worker_state_cannot_render_during_shutdown(self):
+        shell = self._make_shell("kitty")
+        shell._exiting = True
+
+        with (
+            patch.object(shell.indicator, "render") as render,
+            patch.object(shell.voice_thread, "set_processing") as set_processing,
+        ):
+            shell._set_cursor_state(VoiceState.THINKING)
+            shell._set_system_mic_muted(True)
+
+        render.assert_not_called()
+        set_processing.assert_not_called()
+
+    def test_output_snapshot_is_a_locked_copy(self):
         shell = self._make_shell("none")
-        shell.master_fd = 7
+        shell.output_history.extend((b"one", b"two"))
 
-        def write_response(_fd, payload):
-            self.assertIn(b"__VSH_START_fixed__", payload)
-            shell._cap_buf.extend(b"echoed commands\r\n__VSH_START_fixed__\r\nhello\r\n__VSH_END_fixed__:7\r\nprompt")
+        self.assertEqual(shell.output_snapshot(), b"onetwo")
 
-        with patch("secrets.token_hex", return_value="fixed"), patch("os.write", side_effect=write_response):
-            output, exit_code = shell.exec_command("printf hello")
+    def test_reap_shell_waits_after_terminating_the_process_group(self):
+        shell = self._make_shell("none")
+        shell.shell_pid = 4321
 
-        self.assertEqual(output, "hello")
-        self.assertEqual(exit_code, 7)
+        with (
+            patch("os.waitpid", side_effect=[(0, 0), (4321, 0)]) as waitpid,
+            patch("os.getpgid", return_value=4321),
+            patch("os.killpg") as killpg,
+        ):
+            shell._reap_shell()
+
+        self.assertEqual(waitpid.call_args_list[0].args, (4321, os.WNOHANG))
+        self.assertEqual(waitpid.call_args_list[1].args, (4321, 0))
+        killpg.assert_called_once_with(4321, pty_module.signal.SIGKILL)
 
 
 class TestHeadlessImport(unittest.TestCase):

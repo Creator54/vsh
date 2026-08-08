@@ -1,8 +1,6 @@
 import os
 import sys
 
-
-
 from vsh.core.config import load_config
 from vsh.core.pty_shell import PtyShell
 from vsh.providers import resolve_stt, resolve_thinker, resolve_tts
@@ -56,9 +54,6 @@ if len(sys.argv) >= 3 and sys.argv[1] == "-c":
         inner = "/bin/bash"
 
     os.execv(inner, [inner, "-c"] + sys.argv[2:])
-
-
-
 
 
 def setup_logger(v: bool):
@@ -129,7 +124,7 @@ def _get_typer_app():
         no_overlay: bool = typer.Option(
             False, "--no-overlay", help="Hide the voice indicator and use the normal terminal cursor."
         ),
-        serve: bool = typer.Option(False, "--serve", help="Expose this live shell on a local-only web server."),
+        serve: bool = typer.Option(False, "--serve", help="Expose read-only shell status on a local-only web server."),
         port: int = typer.Option(8770, "--port", help="Port for --serve (default 8770)."),
     ):
         """Start an interactive terminal controlled by voice."""
@@ -164,35 +159,13 @@ def _get_typer_app():
             except Exception as e:
                 logger.error(f"Failed to load AI provider '{config.llm.provider}': {e}")
 
-        tts_provider = None
-        try:
-            tts_provider = resolve_tts(config)
-        except Exception as e:
-            logger.error(f"Failed to load TTS '{config.tts.provider}': {e}")
-
-        if config.tts.provider not in ("", "none") and not tts_provider:
-            logger.warning(f"Unknown or failed TTS provider: {config.tts.provider}")
-
         pty_shell = PtyShell(
             config,
             thinker,
             verbose=VERBOSE,
-            tts_provider=tts_provider,
             voice_handler=voice_handler,
+            server_port=port if serve else None,
         )
-
-        if serve:
-            try:
-                from vsh.core.server import serve as serve_http
-
-                http_server = serve_http(pty_shell, port=port)
-                if http_server is not None:
-                    host, actual_port = http_server.server_address
-                    logger.success(
-                        f"HTTP bridge · http://{host}:{actual_port} · Authorization: Bearer {http_server.auth_token}"
-                    )
-            except Exception as e:
-                logger.error(f"Shell bridge failed: {e}")
 
         try:
             pty_shell.run()
@@ -390,17 +363,10 @@ if __name__ == "__main__":
             except Exception as e:
                 sys.stderr.write(f"Failed to load AI provider '{config.llm.provider}': {e}\n")
 
-        tts_provider = None
-        try:
-            tts_provider = resolve_tts(config)
-        except Exception as e:
-            sys.stderr.write(f"Failed to load TTS '{config.tts.provider}': {e}\n")
-
         pty_shell = PtyShell(
             config,
             thinker,
             verbose=False,
-            tts_provider=tts_provider,
             voice_handler=voice_handler,
         )
         try:

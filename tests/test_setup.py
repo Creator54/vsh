@@ -1,9 +1,28 @@
+import fcntl
+import multiprocessing
 import os
 import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from vsh.core.setup import get_default_rc, interactive_setup, update_keybind_config, update_shell_rc_bind
+from vsh.core.setup import _locked_file, get_default_rc, interactive_setup, update_keybind_config, update_shell_rc_bind
+
+
+def _update_keybind_in_process(config: str, result) -> None:
+    lock_path = Path(config).with_name(f"{Path(config).name}.vsh.lock")
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            result.put("waiting")
+        else:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            result.put("not-waiting")
+    try:
+        update_keybind_config(Path(config), {"name": "ctrl+g", "triggers": ["07"]})
+        result.put(None)
+    except Exception as error:
+        result.put(repr(error))
 
 
 def test_keybind_update_preserves_other_tables_and_values(tmp_path: Path):
@@ -34,6 +53,38 @@ def test_keybind_update_adds_a_missing_table(tmp_path: Path):
     update_keybind_config(config, {"name": "ctrl+g", "triggers": ["07"]})
 
     data = tomllib.loads(config.read_text())
+    assert data["keybinds"] == {"toggle_listen": "ctrl+g", "toggle_listen_triggers": ["07"]}
+
+
+def test_keybind_update_preserves_a_symlinked_config(tmp_path: Path):
+    target = tmp_path / "managed.toml"
+    target.write_text('[shell]\ninner_shell = "/bin/fish"\n')
+    config = tmp_path / "config.toml"
+    config.symlink_to(target)
+
+    update_keybind_config(config, {"name": "ctrl+g", "triggers": ["07"]})
+
+    assert config.is_symlink()
+    assert tomllib.loads(target.read_text())["keybinds"]["toggle_listen"] == "ctrl+g"
+
+
+def test_keybind_update_waits_for_concurrent_config_writer(tmp_path: Path):
+    config = tmp_path / "config.toml"
+    config.write_text('[shell]\ninner_shell = "/bin/bash"\n')
+    context = multiprocessing.get_context("spawn")
+    result = context.Queue()
+    process = context.Process(target=_update_keybind_in_process, args=(str(config), result))
+
+    with _locked_file(config):
+        process.start()
+        assert result.get(timeout=5) == "waiting"
+        config.write_text('[shell]\ninner_shell = "/bin/bash"\n\n[stt]\nprovider = "vosk"\n')
+
+    process.join(timeout=5)
+    assert process.exitcode == 0
+    assert result.get(timeout=1) is None
+    data = tomllib.loads(config.read_text())
+    assert data["stt"] == {"provider": "vosk"}
     assert data["keybinds"] == {"toggle_listen": "ctrl+g", "toggle_listen_triggers": ["07"]}
 
 

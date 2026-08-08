@@ -2,6 +2,7 @@ import warnings
 
 # Silence deprecation warnings at the source.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+import fcntl  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import shutil  # noqa: E402
@@ -24,22 +25,56 @@ class VoskSTTProvider:
         self.model_url = model_url
 
         # Use XDG-compatible path so models work regardless of install method
-        model_path = str(Path.home() / ".local" / "share" / "vsh" / "models" / self.model_name)
-        if not os.path.exists(model_path):
-            if not self.model_url:
+        model_path = Path.home() / ".local" / "share" / "vsh" / "models" / self.model_name
+        self._ensure_model(model_path, self.model_url)
+        self.model = Model(str(model_path))
+
+    def _ensure_model(self, model_path: str | Path, model_url: str | None):
+        model_path = Path(model_path)
+        if model_path.exists():
+            return
+
+        parent = model_path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        lock_path = parent / f".{model_path.name}.lock"
+        staging = parent / f".{model_path.name}.installing"
+
+        with lock_path.open("a+") as lock:
+            os.chmod(lock_path, 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                logger.info(f"Waiting for another VSH session to install {self.model_name}...")
+                fcntl.flock(lock, fcntl.LOCK_EX)
+
+            if model_path.exists():
+                return
+            if not model_url:
                 raise ValueError(
                     f"Vosk model '{self.model_name}' is not installed at '{model_path}' and no download URL is configured."
                 )
-            self._ensure_model(model_path, self.model_url)
-        self.model = Model(model_path)
 
-    def _ensure_model(self, model_path: str, model_url: str):
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            shutil.rmtree(staging, ignore_errors=True)
+            extracted = staging / "extracted"
+            archive = staging / "model.zip"
+            extracted.mkdir(parents=True)
+            try:
+                self._download_model(archive, model_url)
+                logger.info("Extracting...")
+                shutil.unpack_archive(archive, extracted)
+                staged_model = extracted / model_path.name
+                if not staged_model.is_dir():
+                    raise ValueError(f"Downloaded archive does not contain {model_path.name!r}")
+                os.replace(staged_model, model_path)
+                logger.success("Model ready.")
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+
+    def _download_model(self, archive: Path, model_url: str):
         logger.info(f"Downloading model {self.model_name}...")
-        tmp_zip = model_path + ".tmp.zip"
         import urllib.request
 
-        with urllib.request.urlopen(model_url, timeout=30) as r, open(tmp_zip, "wb") as f:
+        with urllib.request.urlopen(model_url, timeout=30) as r, archive.open("wb") as f:
             total_size = int(r.headers.get("Content-Length", 0))
             downloaded = 0
             chunk_size = 128 * 1024
@@ -57,10 +92,6 @@ class VoskSTTProvider:
                     sys.stderr.flush()
             if total_size:
                 sys.stderr.write("\n")
-        logger.info("Extracting...")
-        shutil.unpack_archive(tmp_zip, os.path.dirname(model_path))
-        os.remove(tmp_zip)
-        logger.success("Model ready.")
 
     def transcribe_stream(self, audio_stream: Iterator[bytes], on_phrase=None, rate: int = 16000) -> str:
         rec, res = KaldiRecognizer(self.model, rate), []

@@ -103,6 +103,7 @@ class PipeWireMicMonitor(threading.Thread):
         self._callback = callback
         self._command = shutil.which("pw-dump")
         self._stop_event = threading.Event()
+        self._process_lock = threading.Lock()
         self._process = None
 
     @property
@@ -111,15 +112,37 @@ class PipeWireMicMonitor(threading.Thread):
 
     def stop(self):
         self._stop_event.set()
-        process = self._process
+        with self._process_lock:
+            process = self._process
         if process and process.poll() is None:
             try:
-                if process.stdout:
-                    process.stdout.close()
+                process.terminate()
             except OSError:
                 pass
             try:
+                if process.stdout:
+                    process.stdout.close()
+            except (OSError, ValueError):
+                pass
+
+    @staticmethod
+    def _reap(process):
+        if process is None:
+            return
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
                 process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait()
             except OSError:
                 pass
 
@@ -132,17 +155,23 @@ class PipeWireMicMonitor(threading.Thread):
         while not self._stop_event.is_set():
             decoder = JsonStreamDecoder()
             state = PipeWireState()
+            process = None
             try:
-                self._process = subprocess.Popen(
+                process = subprocess.Popen(
                     [self._command, "--monitor"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     text=True,
                     bufsize=1,
                 )
-                if self._process.stdout is None:
+                with self._process_lock:
+                    self._process = process
+                    stopped = self._stop_event.is_set()
+                if stopped:
+                    continue
+                if process.stdout is None:
                     raise OSError("pw-dump stdout is unavailable")
-                for line in self._process.stdout:
+                for line in process.stdout:
                     if self._stop_event.is_set():
                         break
                     for document in decoder.feed(line):
@@ -154,14 +183,10 @@ class PipeWireMicMonitor(threading.Thread):
                 if not self._stop_event.is_set():
                     logger.debug("PipeWire microphone monitor unavailable: {}", error)
             finally:
-                process = self._process
-                self._process = None
-                if process and process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=1)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
+                with self._process_lock:
+                    if self._process is process:
+                        self._process = None
+                self._reap(process)
 
             if self._stop_event.wait(1):
                 break
