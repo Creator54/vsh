@@ -464,10 +464,15 @@ class PtyShell:
                 self.voice_thread.join(timeout=0.01)
                 if self.shell_pid:
                     try:
-                        wpid, _ = os.waitpid(self.shell_pid, os.WNOHANG)
-                        if wpid == 0:
-                            os.kill(self.shell_pid, signal.SIGKILL)
-                            os.waitpid(self.shell_pid, 0)
+                        try:
+                            pgid = os.getpgid(self.shell_pid)
+                            os.killpg(pgid, signal.SIGKILL)
+                        except (OSError, ProcessLookupError):
+                            try:
+                                os.kill(self.shell_pid, signal.SIGKILL)
+                            except (OSError, ProcessLookupError):
+                                pass
+                        os.waitpid(self.shell_pid, os.WNOHANG)
                     except (ChildProcessError, ProcessLookupError, OSError):
                         pass
 

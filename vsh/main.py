@@ -407,6 +407,6 @@ if __name__ == "__main__":
             pty_shell.run()
         except Exception as e:
             sys.stderr.write(f"Shell crashed: {e}\n")
-        sys.exit(0)
+        os._exit(0)
     else:
         _get_typer_app()()
