@@ -6,7 +6,7 @@ import select
 import sys
 import time
 
-from loguru import logger
+from vsh.core.logger import logger
 
 from vsh.core.voice_input import VoiceState
 
@@ -55,7 +55,7 @@ class VoiceIndicator:
     def select_mode(self, tty_available: bool) -> None:
         configured = self.configured_mode.lower()
         if configured not in ("auto", "kitty", "none"):
-            logger.warning("Unknown overlay mode {!r}; using auto", configured)
+            logger.warning(f"Unknown overlay mode {configured!r}; using auto")
             configured = "auto"
         if configured == "none" or not tty_available:
             self.mode = "none"

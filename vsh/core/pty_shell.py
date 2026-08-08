@@ -16,7 +16,7 @@ import time
 import tty
 from dataclasses import dataclass
 
-from loguru import logger
+from vsh.core.logger import logger
 
 from vsh.core.config import VshConfig
 from vsh.core.mic_state import PipeWireMicMonitor
@@ -421,29 +421,26 @@ class PtyShell:
             signal.signal(signal.SIGWINCH, self._handle_sigwinch)
             self._handle_sigwinch(None, None)
 
-            self.mic_monitor.start()
-            self.voice_thread.start()
-
-            self.pipeline_thread = threading.Thread(target=self._pipeline_worker, daemon=True)
-            self.pipeline_thread.start()
-
             self._setup_terminal()
             self.indicator.select_mode(self.old_tty_attrs is not None)
 
-            def show_startup_ui():
-                time.sleep(0.5)
-                if self._exiting or self.master_fd is None:
+            def async_bg_init():
+                if self._exiting:
                     return
                 try:
+                    self.mic_monitor.start()
+                    self.voice_thread.start()
+                    self.pipeline_thread = threading.Thread(target=self._pipeline_worker, daemon=True)
+                    self.pipeline_thread.start()
                     self.shell_state = "idle"
-                    if self.verbose:
+                    if self.verbose and not self._exiting:
                         self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} or Ctrl+G to toggle.")
                     if self.config.shell.voice_on_start and not self._exiting:
                         self._toggle_listening()
                 except Exception:
                     pass
 
-            threading.Thread(target=show_startup_ui, daemon=True).start()
+            threading.Thread(target=async_bg_init, daemon=True).start()
 
             try:
                 self._io_loop()

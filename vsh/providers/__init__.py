@@ -1,4 +1,4 @@
-from loguru import logger
+from vsh.core.logger import logger
 
 from vsh.core.config import VshConfig
 def resolve_stt(config: VshConfig):
