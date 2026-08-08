@@ -4,12 +4,14 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 import contextlib  # noqa: E402
 import os  # noqa: E402
 import queue  # noqa: E402
+import stat  # noqa: E402
 import statistics  # noqa: E402
-import sys  # noqa: E402
+import tempfile  # noqa: E402
 import threading  # noqa: E402
 import wave  # noqa: E402
 from collections import deque  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
+from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pyaudio  # noqa: E402
@@ -177,23 +179,9 @@ def detect_phrase(
     return finish("eof")
 
 
-_STDERR_LOCK = threading.RLock()
-
-
-@contextlib.contextmanager
 def no_stderr():
-    """Silence low-level audio library warnings cleanly."""
-    with _STDERR_LOCK:
-        fd = sys.stderr.fileno()
-        with os.fdopen(os.dup(fd), "w") as saved:
-            with open(os.devnull, "w") as devnull:
-                sys.stderr.flush()
-                os.dup2(devnull.fileno(), fd)
-                try:
-                    yield
-                finally:
-                    sys.stderr.flush()
-                    os.dup2(saved.fileno(), fd)
+    """Retained for callers; redirecting process-wide stderr is thread-unsafe."""
+    return contextlib.nullcontext()
 
 
 def play_audio(data: bytes, rate: int, width: int = 2, device_index=None):
@@ -211,11 +199,26 @@ def play_audio(data: bytes, rate: int, width: int = 2, device_index=None):
 
 
 def save_audio(p: str, data: bytes, rate: int, width: int = 2):
-    with wave.open(p, "wb") as f:
-        f.setnchannels(1)
-        f.setsampwidth(width)
-        f.setframerate(rate)
-        f.writeframes(data)
+    target = Path(p)
+    if target.is_symlink():
+        target = target.resolve()
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+    fd, pending = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    pending_path = Path(pending)
+    try:
+        with os.fdopen(fd, "wb") as raw:
+            with wave.open(raw, "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(width)
+                output.setframerate(rate)
+                output.writeframes(data)
+            raw.flush()
+            os.fsync(raw.fileno())
+        if mode is not None:
+            os.chmod(pending_path, mode)
+        os.replace(pending_path, target)
+    finally:
+        pending_path.unlink(missing_ok=True)
 
 
 def synthesize_pcm16(provider, text: str) -> tuple[bytes, int]:
@@ -376,11 +379,6 @@ class MicStream:
         def report_volume(energy: int, current_threshold: int):
             if volume_callback:
                 volume_callback(energy, current_threshold)
-            if verbose:
-                bars = min(30, energy // 200)
-                meter = "|" + "#" * bars + " " * (30 - bars) + "|"
-                sys.stderr.write(f"\r{meter} {energy:5} (thr:{current_threshold})")
-                sys.stderr.flush()
 
         capture = detect_phrase(
             self._frames(stop_check),
@@ -393,9 +391,6 @@ class MicStream:
             activity_callback=activity_callback,
             noise_energies=self._noise_energies,
         )
-        if verbose:
-            sys.stderr.write("\r\033[K")
-            sys.stderr.flush()
         return capture
 
 

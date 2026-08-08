@@ -37,7 +37,7 @@ _CURSOR_SHAPES = {
 class VoiceIndicator:
     """Show voice state without occupying terminal cells."""
 
-    def __init__(self, configured_mode: str, vad_threshold: int):
+    def __init__(self, configured_mode: str, vad_threshold: int, terminal_lock=None):
         self.configured_mode = configured_mode
         self.mode = "none"
         self.cols = 80
@@ -51,7 +51,7 @@ class VoiceIndicator:
         self._typing_until = 0.0
         self._alternate_screen = False
         self._control_tail = b""
-        self._lock = threading.RLock()
+        self._lock = terminal_lock or threading.RLock()
 
     def select_mode(self, tty_available: bool) -> None:
         with self._lock:

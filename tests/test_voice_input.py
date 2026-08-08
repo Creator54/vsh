@@ -2,10 +2,10 @@ import multiprocessing
 import os
 import queue
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
-import vsh.core.audio as audio_module
 from vsh.core.audio import PhraseCapture
 from vsh.core.microphone import acquire_microphone, release_microphone
 from vsh.core.voice_input import VoiceInputThread, VoiceState, _is_silence_hallucination, _is_valid_transcript
@@ -73,6 +73,57 @@ def test_toggle_does_not_load_the_model_on_the_terminal_thread(tmp_path: Path):
         thread.stop()
 
 
+def test_concurrent_toggles_publish_callbacks_in_transition_order():
+    first_callback_entered = threading.Event()
+    release_first_callback = threading.Event()
+    states = []
+
+    def state_changed(state):
+        if state == VoiceState.IDLE:
+            first_callback_entered.set()
+            assert release_first_callback.wait(timeout=1)
+        states.append(state)
+
+    voice = VoiceInputThread(queue.Queue(), state_callback=state_changed)
+    first = threading.Thread(target=voice.toggle_listening)
+    second = threading.Thread(target=voice.toggle_listening)
+    first.start()
+    assert first_callback_entered.wait(timeout=1)
+    second.start()
+    second_finished_early = not second.is_alive()
+    release_first_callback.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+
+    assert not second_finished_early
+    assert states == [VoiceState.IDLE, None]
+    assert not voice.is_listening
+
+
+def test_concurrent_suppression_keeps_the_longer_deadline():
+    voice = VoiceInputThread(queue.Queue())
+    long_update_done = threading.Event()
+
+    def clock():
+        if threading.current_thread().name == "short-suppression":
+            assert long_update_done.wait(timeout=1)
+        return 10.0
+
+    def suppress_longer():
+        voice.suppress_input(0.6)
+        long_update_done.set()
+
+    with patch("vsh.core.voice_input.time.monotonic", side_effect=clock):
+        short = threading.Thread(name="short-suppression", target=voice.suppress_input, args=(0.3,))
+        long = threading.Thread(name="long-suppression", target=suppress_longer)
+        short.start()
+        long.start()
+        short.join(timeout=1)
+        long.join(timeout=1)
+
+    assert voice._suppress_until == 10.6
+
+
 def test_microphone_lease_is_exclusive_and_released(tmp_path: Path):
     context = multiprocessing.get_context("spawn")
     result = context.Queue()
@@ -93,10 +144,12 @@ def test_microphone_lease_is_exclusive_and_released(tmp_path: Path):
         assert result.get(timeout=1) is True
 
 
-def test_voice_capture_does_not_hold_the_process_stderr_lock():
+def test_microphone_lease_is_held_until_stream_close_finishes(tmp_path: Path):
     entered = threading.Event()
+    closing = threading.Event()
+    finish_close = threading.Event()
 
-    class ActiveStream:
+    class ClosingStream:
         def __init__(self, **_kwargs):
             pass
 
@@ -105,7 +158,8 @@ def test_voice_capture_does_not_hold_the_process_stderr_lock():
             return self
 
         def __exit__(self, *_args):
-            pass
+            closing.set()
+            assert finish_close.wait(timeout=2)
 
         def suspend(self):
             pass
@@ -118,15 +172,159 @@ def test_voice_capture_does_not_hold_the_process_stderr_lock():
     thread.is_processing = True
     thread.load_model = lambda: None
 
-    with patch("vsh.core.audio.MicStream", ActiveStream):
+    with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(tmp_path)}), patch("vsh.core.audio.MicStream", ClosingStream):
         thread.start()
         assert entered.wait(timeout=1)
-        assert audio_module._STDERR_LOCK.acquire(timeout=0.2)
-        audio_module._STDERR_LOCK.release()
+        assert not thread.toggle_listening()
+        assert closing.wait(timeout=1)
+        assert acquire_microphone() is None
+        finish_close.set()
         thread.stop()
+        thread.join(timeout=2)
+        lease = acquire_microphone()
+
+    assert not thread.is_alive()
+    assert lease is not None
+    release_microphone(lease)
+
+
+def test_model_load_precedes_lease_and_monitor_lifetime():
+    events = []
+    lease = object()
+
+    class OneShotStream:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            events.append("stream-enter")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("stream-exit")
+
+        def suspend(self):
+            pass
+
+    thread = VoiceInputThread(
+        queue.Queue(),
+        capture_started_callback=lambda: events.append("monitor-start"),
+        capture_stopped_callback=lambda: events.append("monitor-stop"),
+    )
+    thread.is_listening = True
+    thread.is_processing = True
+    thread.load_model = lambda: events.append("model")
+
+    def acquire():
+        events.append("lease-acquire")
+        return lease
+
+    def release(value):
+        assert value is lease
+        events.append("lease-release")
+
+    def stop_after_enter():
+        while "stream-enter" not in events:
+            time.sleep(0.001)
+        thread.should_exit = True
+
+    stopper = threading.Thread(target=stop_after_enter)
+    stopper.start()
+    with (
+        patch("vsh.core.microphone.acquire_microphone", side_effect=acquire),
+        patch("vsh.core.microphone.release_microphone", side_effect=release),
+        patch("vsh.core.audio.MicStream", OneShotStream),
+    ):
+        thread.run()
+    stopper.join(timeout=1)
+
+    assert events == [
+        "model",
+        "lease-acquire",
+        "stream-enter",
+        "monitor-start",
+        "stream-exit",
+        "monitor-stop",
+        "lease-release",
+    ]
+
+
+def test_system_unmute_resumes_capture_without_releasing_monitor_or_lease():
+    events = []
+    capture_started = threading.Event()
+    monitor_started = threading.Event()
+    monitor_stopped = threading.Event()
+    lease = object()
+
+    class MutedStream:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            events.append("stream-enter")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("stream-exit")
+
+        def suspend(self):
+            events.append("stream-suspend")
+
+        def resume(self):
+            events.append("stream-resume")
+
+        def abort(self):
+            pass
+
+        def capture_phrase(self, **_kwargs):
+            events.append("capture")
+            capture_started.set()
+            thread.should_exit = True
+            return PhraseCapture()
+
+    def monitor_start():
+        events.append("monitor-start")
+        thread.set_system_mic_muted(True)
+        monitor_started.set()
+
+    def monitor_stop():
+        events.append("monitor-stop")
+        monitor_stopped.set()
+
+    thread = VoiceInputThread(
+        queue.Queue(),
+        capture_started_callback=monitor_start,
+        capture_stopped_callback=monitor_stop,
+    )
+    thread.is_listening = True
+    thread.load_model = lambda: events.append("model")
+
+    with (
+        patch("vsh.core.microphone.acquire_microphone", side_effect=lambda: events.append("lease-acquire") or lease),
+        patch("vsh.core.microphone.release_microphone", side_effect=lambda _lease: events.append("lease-release")),
+        patch("vsh.core.audio.MicStream", MutedStream),
+    ):
+        thread.start()
+        assert monitor_started.wait(timeout=1)
+        stopped_while_muted = monitor_stopped.wait(timeout=0.1)
+        thread.set_system_mic_muted(False)
+        assert capture_started.wait(timeout=1)
         thread.join(timeout=1)
 
     assert not thread.is_alive()
+    assert not stopped_while_muted
+    assert events == [
+        "model",
+        "lease-acquire",
+        "stream-enter",
+        "monitor-start",
+        "stream-suspend",
+        "stream-resume",
+        "capture",
+        "stream-exit",
+        "monitor-stop",
+        "lease-release",
+    ]
 
 
 def test_processing_state_suspends_and_resumes_the_active_stream():

@@ -2,6 +2,7 @@ import os
 import struct
 import tempfile
 import termios
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,11 +15,13 @@ from vsh.core.voice_input import VoiceState
 
 
 class _FakeVoiceThread:
-    def __init__(self, state_callback=None):
+    def __init__(self, state_callback=None, capture_started_callback=None, capture_stopped_callback=None):
         self.is_listening = False
         self.is_processing = False
         self.system_mic_muted = None
         self.state_callback = state_callback
+        self.capture_started_callback = capture_started_callback
+        self.capture_stopped_callback = capture_stopped_callback
 
     def toggle_listening(self):
         self.is_listening = not self.is_listening
@@ -43,7 +46,11 @@ class OverlayTests(unittest.TestCase):
         cfg.tts.provider = "none"
         with patch(
             "vsh.core.pty_shell.VoiceInputThread",
-            side_effect=lambda *_args, **kwargs: _FakeVoiceThread(kwargs.get("state_callback")),
+            side_effect=lambda *_args, **kwargs: _FakeVoiceThread(
+                kwargs.get("state_callback"),
+                kwargs.get("capture_started_callback"),
+                kwargs.get("capture_stopped_callback"),
+            ),
         ):
             shell = PtyShell(cfg, thinker=None, verbose=False, tts_provider=None)
         shell.master_fd = 7
@@ -444,14 +451,79 @@ class OverlayTests(unittest.TestCase):
 
         write.assert_not_called()
 
-    def test_voice_command_is_written_when_input_and_pty_owner_are_unchanged(self):
+    def test_prompt_marker_cannot_override_foreground_pty_ownership(self):
         shell = self._make_shell("none")
         shell.shell_pid = 4321
+        shell._track_pty_controls(b"\x1b]133;A\x07")
+
+        with patch("os.tcgetpgrp", return_value=9876), patch("os.write") as write:
+            self.assertFalse(shell._inject_command("pwd", expected_revision=0))
+
+        write.assert_not_called()
+
+    def test_voice_command_requires_a_prompt_marker_for_every_shell(self):
+        shell = self._make_shell("none")
+        shell.shell_name = "bash"
+        shell.shell_pid = 4321
+
+        with patch("sys.stdout") as stdout, patch("os.tcgetpgrp", return_value=4321), patch("os.write") as write:
+            self.assertFalse(shell._inject_command("pwd", expected_revision=0))
+
+        write.assert_not_called()
+        stdout.write.assert_called_once_with('\r\nvsh: command not injected: "pwd"\r\n')
+
+    def test_voice_command_is_written_at_an_observed_clean_prompt(self):
+        shell = self._make_shell("none")
+        shell.shell_name = "bash"
+        shell.shell_pid = 4321
+        shell._track_pty_controls(b"\x1b]133;A\x07")
 
         with patch("os.tcgetpgrp", return_value=4321), patch("os.write") as write:
             self.assertTrue(shell._inject_command("pwd", expected_revision=0))
 
         write.assert_called_once_with(7, b"pwd")
+
+    def test_fish_voice_command_requires_a_clean_osc133_prompt(self):
+        shell = self._make_shell("none")
+        shell.shell_name = "fish"
+        shell.shell_pid = 4321
+
+        with patch("os.tcgetpgrp", return_value=4321), patch("os.write") as write:
+            self.assertFalse(shell._inject_command("pwd", expected_revision=0))
+
+            shell._track_pty_controls(b"\x1b]13")
+            shell._track_pty_controls(b"3;A;fish=4\x07")
+            self.assertFalse(shell._inject_command("pwd", expected_revision=0))
+            shell._track_pty_controls(b"\x1b]777;vsh-")
+            shell._track_pty_controls(b"prompt\x07")
+            self.assertTrue(shell._inject_command("pwd", expected_revision=0))
+
+            shell._input_revision = 1
+            self.assertFalse(shell._inject_command("pwd", expected_revision=1))
+
+            shell._track_pty_controls(b"\x1b]133;C\x07")
+            self.assertFalse(shell._inject_command("pwd", expected_revision=1))
+            shell._track_pty_controls(b"\x1b]133;D;0\x07")
+            self.assertFalse(shell._inject_command("pwd", expected_revision=1))
+            shell._track_pty_controls(b"\x1b]133;A\x07")
+            self.assertFalse(shell._inject_command("pwd", expected_revision=1))
+            shell._track_pty_controls(b"\x1b]777;vsh-prompt\x07")
+            self.assertTrue(shell._inject_command("pwd", expected_revision=1))
+
+        self.assertEqual(write.call_count, 2)
+
+    def test_fish_exec_installs_a_main_prompt_marker(self):
+        shell = self._make_shell("none")
+        shell.shell_name = "fish"
+        shell.inner_shell_args = ["/bin/fish", "--no-config", "--init-command", "set user_init 1", "-c", "echo ok"]
+
+        args = shell._shell_exec_args()
+
+        self.assertEqual(args[0], "/bin/fish")
+        self.assertEqual(args[:4], ["/bin/fish", "--no-config", "--init-command", "set user_init 1"])
+        self.assertEqual(args[4], "--init-command")
+        self.assertIn("__vsh_saved_fish_prompt", args[5])
+        self.assertEqual(args[6:], ["-c", "echo ok"])
 
     def test_shutdown_cancels_cli_processors(self):
         shell = self._make_shell("none")
@@ -462,6 +534,88 @@ class OverlayTests(unittest.TestCase):
 
         shell.thinker.cancel.assert_called_once_with()
         shell.voice_handler.cancel.assert_called_once_with()
+
+    def test_shutdown_continues_cancelling_after_one_processor_fails(self):
+        shell = self._make_shell("none")
+        shell.voice_handler = MagicMock()
+        shell.voice_handler.cancel.side_effect = PermissionError("denied")
+        shell.thinker = MagicMock()
+
+        shell._cancel_processors()
+
+        shell.voice_handler.cancel.assert_called_once_with()
+        shell.thinker.cancel.assert_called_once_with()
+
+    def test_late_reply_is_dropped_after_terminal_restoration_starts(self):
+        shell = self._make_shell("none")
+        started = threading.Event()
+
+        def publish():
+            started.set()
+            shell._publish_reply("too late", "")
+
+        with patch("sys.stdout") as stdout:
+            shell._terminal_lock.acquire()
+            worker = threading.Thread(target=publish)
+            worker.start()
+            self.assertTrue(started.wait(timeout=1))
+            shell._exiting = True
+            shell._terminal_lock.release()
+            worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        stdout.write.assert_not_called()
+
+    def test_pipewire_monitor_exists_only_while_capture_is_owned(self):
+        shell = self._make_shell("none")
+        monitor = MagicMock()
+        monitor.is_alive.return_value = False
+
+        with patch("vsh.core.pty_shell.PipeWireMicMonitor", return_value=monitor) as constructor:
+            self.assertIsNone(shell.mic_monitor)
+            shell.voice_thread.capture_started_callback()
+            constructor.assert_called_once()
+            monitor.start.assert_called_once_with()
+            shell.voice_thread.capture_stopped_callback()
+
+        monitor.stop.assert_called_once_with()
+        monitor.join.assert_called_once()
+        self.assertIsNone(shell.mic_monitor)
+
+    def test_stopping_monitor_does_not_block_a_replacement_if_join_times_out(self):
+        shell = self._make_shell("none")
+        old_monitor = MagicMock()
+        old_monitor.is_alive.return_value = True
+        new_monitor = MagicMock()
+
+        shell.mic_monitor = old_monitor
+        with patch("vsh.core.pty_shell.PipeWireMicMonitor", return_value=new_monitor) as constructor:
+            shell._stop_mic_monitor()
+            shell._start_mic_monitor()
+
+        old_monitor.stop.assert_called_once_with()
+        old_monitor.join.assert_called_once_with(timeout=2)
+        constructor.assert_called_once()
+        new_monitor.start.assert_called_once_with()
+        self.assertIs(shell.mic_monitor, new_monitor)
+
+    def test_replaced_monitor_cannot_publish_stale_mute_state(self):
+        shell = self._make_shell("none")
+        callbacks = []
+
+        def make_monitor(callback):
+            callbacks.append(callback)
+            return MagicMock()
+
+        with patch("vsh.core.pty_shell.PipeWireMicMonitor", side_effect=make_monitor):
+            shell._start_mic_monitor()
+            shell._stop_mic_monitor()
+            shell._start_mic_monitor()
+
+        callbacks[0](True)
+        self.assertIsNone(shell.voice_status()["mic_muted"])
+        callbacks[1](False)
+        self.assertFalse(shell.voice_status()["mic_muted"])
 
     def test_deprecated_fish_bridge_uses_stdout_and_pty_without_signalling(self):
         shell = self._make_shell("none")
@@ -552,6 +706,53 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(waitpid.call_args_list[0].args, (4321, os.WNOHANG))
         self.assertEqual(waitpid.call_args_list[1].args, (4321, 0))
         killpg.assert_called_once_with(4321, pty_module.signal.SIGKILL)
+
+    def test_parent_startup_failure_still_restores_and_reaps(self):
+        shell = self._make_shell("none")
+        shell._restore_terminal = MagicMock()
+        shell._reap_shell = MagicMock()
+
+        with (
+            patch("vsh.core.pty_shell.pty.fork", return_value=(4321, 7)),
+            patch("vsh.core.pty_shell.signal.signal"),
+            patch.object(shell, "_handle_sigwinch"),
+            patch.object(shell, "_setup_terminal"),
+            patch.object(shell.indicator, "select_mode", side_effect=RuntimeError("probe failed")),
+            patch("vsh.core.pty_shell.os.tcgetpgrp", side_effect=OSError),
+            patch("vsh.core.pty_shell.os.close") as close,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                shell.run()
+
+        self.assertTrue(shell._exiting)
+        shell._restore_terminal.assert_called_once_with()
+        close.assert_called_once_with(7)
+        shell._reap_shell.assert_called_once_with()
+
+    def test_cleanup_kills_a_foreground_group_owned_by_the_shell_session(self):
+        shell = self._make_shell("none")
+        shell.shell_pid = 4321
+
+        with (
+            patch("os.tcgetpgrp", return_value=9876),
+            patch("os.killpg") as killpg,
+        ):
+            shell._kill_foreground_process_group()
+
+        killpg.assert_called_once_with(9876, pty_module.signal.SIGKILL)
+
+    def test_cleanup_kills_a_foreground_group_after_its_leader_exits(self):
+        shell = self._make_shell("none")
+        shell.shell_pid = 4321
+
+        with (
+            patch("os.tcgetpgrp", return_value=9876),
+            patch("os.getsid", side_effect=ProcessLookupError),
+            patch("os.killpg") as killpg,
+        ):
+            shell._kill_foreground_process_group()
+
+        killpg.assert_called_once_with(9876, pty_module.signal.SIGKILL)
 
 
 class TestHeadlessImport(unittest.TestCase):

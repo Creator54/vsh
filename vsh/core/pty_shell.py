@@ -22,6 +22,15 @@ from vsh.core.voice_indicator import VoiceIndicator
 from vsh.core.voice_input import VoiceInputThread, VoiceState
 
 _ANSI = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-_][0-?]*[ -/]*[@-~]")
+_OSC133 = re.compile(rb"\x1b\]133;([ABCD])(?:;[^\x07\x1b]*)?(?:\x07|\x1b\\)")
+_VSH_FISH_PROMPT = b"\x1b]777;vsh-prompt\x07"
+_FISH_PROMPT_INIT = (
+    "functions --erase __vsh_saved_fish_prompt; "
+    "if functions --copy fish_prompt __vsh_saved_fish_prompt; "
+    "function fish_prompt; __vsh_saved_fish_prompt $argv; "
+    "if not contains -- --final-rendering $argv; printf '\\e]777;vsh-prompt\\a'; end; end; "
+    "end"
+)
 
 
 def _strip_ansi(b: bytes) -> bytes:
@@ -138,6 +147,9 @@ class PtyShell:
 
         self.master_fd = None
         self.stt_queue = queue.Queue()
+        self._terminal_lock = threading.RLock()
+        self._mic_monitor_lock = threading.Lock()
+        self.mic_monitor = None
         self.voice_thread = VoiceInputThread(
             self.stt_queue,
             config=self.config,
@@ -147,9 +159,11 @@ class PtyShell:
             vad_silence_limit=self.config.stt.vad_silence_limit,
             volume_callback=self._volume_callback,
             state_callback=self._set_cursor_state,
+            capture_started_callback=self._start_mic_monitor,
+            capture_stopped_callback=self._stop_mic_monitor,
         )
-        self.mic_monitor = PipeWireMicMonitor(self._set_system_mic_muted)
         self.pipeline_thread = None
+        self.background_thread = None
         self.old_tty_attrs = None
         self._interrupted = False
         self._exiting = False
@@ -157,7 +171,11 @@ class PtyShell:
         self._input_lock = threading.Lock()
         self._input_revision = 0
         self._voice_input_revision = 0
-        self.indicator = VoiceIndicator(config.shell.overlay_mode, config.stt.vad_threshold)
+        self._prompt_markers_seen = False
+        self._prompt_ready = False
+        self._prompt_input_revision = 0
+        self._prompt_control_tail = b""
+        self.indicator = VoiceIndicator(config.shell.overlay_mode, config.stt.vad_threshold, self._terminal_lock)
         self._current_cursor_state = None
         self._system_mic_muted = None
 
@@ -260,14 +278,15 @@ class PtyShell:
         """Remove the voice indicator and restore the original terminal state."""
         if not self.old_tty_attrs:
             return
-        try:
-            self.indicator.restore()
-        except (OSError, ValueError, termios.error):
-            pass
-        try:
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, self.old_tty_attrs)
-        except (OSError, ValueError, termios.error):
-            pass
+        with self._terminal_lock:
+            try:
+                self.indicator.restore()
+            except (OSError, ValueError, termios.error):
+                pass
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSAFLUSH, self.old_tty_attrs)
+            except (OSError, ValueError, termios.error):
+                pass
 
     def _handle_sigint(self, signum, frame):
         self._interrupted = True
@@ -286,9 +305,10 @@ class PtyShell:
             pass
 
     def _volume_callback(self, energy: int, threshold: int):
-        if self._exiting:
-            return
-        self.indicator.update_volume(energy, threshold)
+        with self._terminal_lock:
+            if self._exiting:
+                return
+            self.indicator.update_volume(energy, threshold)
 
     def _resting_voice_state(self) -> VoiceState | None:
         if self.voice_thread.is_listening:
@@ -309,29 +329,30 @@ class PtyShell:
 
     def _set_cursor_state(self, state: VoiceState | str | None):
         """Update pipeline state and its visual indicator."""
-        if self._exiting:
-            return
-        state = VoiceState(state) if state is not None else None
-        if state == VoiceState.TRANSCRIBING:
-            with self._input_lock:
-                self._voice_input_revision = self._input_revision
-        if state in (VoiceState.TRANSCRIBING, VoiceState.THINKING, VoiceState.TYPING, VoiceState.SPEAKING):
-            if hasattr(self, "voice_thread"):
-                self.voice_thread.set_processing(True)
-        elif state in (None, VoiceState.MUTED, VoiceState.IDLE):
-            if hasattr(self, "voice_thread"):
-                self.voice_thread.set_processing(False)
-
-        self._current_cursor_state = state
-        self.indicator.render(self._effective_cursor_state())
+        with self._terminal_lock:
+            if self._exiting:
+                return
+            state = VoiceState(state) if state is not None else None
+            if state == VoiceState.TRANSCRIBING:
+                with self._input_lock:
+                    self._voice_input_revision = self._input_revision
+            if state in (VoiceState.TRANSCRIBING, VoiceState.THINKING, VoiceState.TYPING, VoiceState.SPEAKING):
+                if hasattr(self, "voice_thread"):
+                    self.voice_thread.set_processing(True)
+            elif state in (None, VoiceState.MUTED, VoiceState.IDLE):
+                if hasattr(self, "voice_thread"):
+                    self.voice_thread.set_processing(False)
+            self._current_cursor_state = state
+            self.indicator.render(self._effective_cursor_state())
 
     def _set_system_mic_muted(self, muted: bool | None):
-        if self._exiting:
-            return
-        self._system_mic_muted = muted
-        if hasattr(self, "voice_thread"):
-            self.voice_thread.set_system_mic_muted(muted)
-        self.indicator.render(self._effective_cursor_state())
+        with self._terminal_lock:
+            if self._exiting:
+                return
+            if hasattr(self, "voice_thread"):
+                self.voice_thread.set_system_mic_muted(muted)
+            self._system_mic_muted = muted
+            self.indicator.render(self._effective_cursor_state())
 
     def voice_status(self) -> dict:
         state = self._effective_cursor_state()
@@ -345,28 +366,118 @@ class PtyShell:
 
     def _user_started_typing(self):
         self.voice_thread.suppress_input(0.6)
-        self.indicator.user_started_typing()
+        with self._terminal_lock:
+            if not self._exiting:
+                self.indicator.user_started_typing()
 
     def _track_pty_controls(self, data: bytes):
+        stream = self._prompt_control_tail + data
+        events = [(match.start(), match.end(), match.group(1)) for match in _OSC133.finditer(stream)]
+        events.extend((match.start(), match.end(), b"V") for match in re.finditer(re.escape(_VSH_FISH_PROMPT), stream))
+        events.sort()
+        if events:
+            with self._input_lock:
+                for _, _, event in events:
+                    self._prompt_markers_seen = True
+                    if event == b"V" or (event == b"A" and self.shell_name != "fish"):
+                        self._prompt_ready = True
+                        self._prompt_input_revision = self._input_revision
+                    elif event in (b"C", b"D"):
+                        self._prompt_ready = False
+
+        remaining = stream[max((end for _, end, _ in events), default=0) :]
+        prefixes = (b"\x1b]133;", _VSH_FISH_PROMPT[:-1])
+        starts = [remaining.rfind(prefix) for prefix in prefixes]
+        starts = [start for start in starts if start >= 0]
+        if starts:
+            self._prompt_control_tail = remaining[min(starts) :][-1024:]
+        else:
+            overlap = next(
+                (
+                    size
+                    for size in range(min(max(map(len, prefixes)) - 1, len(remaining)), 0, -1)
+                    if any(remaining.endswith(prefix[:size]) for prefix in prefixes if size < len(prefix))
+                ),
+                0,
+            )
+            self._prompt_control_tail = remaining[-overlap:] if overlap else b""
         self.indicator.track_output(data)
+
+    def _shell_exec_args(self) -> list[str]:
+        if self.shell_name != "fish":
+            return self.inner_shell_args
+        args = list(self.inner_shell_args)
+        value_options = {
+            "-C",
+            "--init-command",
+            "-d",
+            "--debug",
+            "-o",
+            "--debug-output",
+            "-p",
+            "--profile",
+            "--profile-startup",
+            "-f",
+            "--features",
+        }
+        insertion = len(args)
+        index = 1
+        while index < len(args):
+            argument = args[index]
+            if argument in ("-c", "--command", "--") or not argument.startswith("-"):
+                insertion = index
+                break
+            index += 2 if argument in value_options else 1
+        return [*args[:insertion], "--init-command", _FISH_PROMPT_INIT, *args[insertion:]]
 
     def _notify(self, msg: str, color="36"):
         """Verbose notification for startup and toggle diagnostics."""
-        if self.verbose and not self._exiting:
+        with self._terminal_lock:
+            if not self.verbose or self._exiting:
+                return
             sys.stdout.buffer.write(f"\r\n\033[{color}m◆\033[0m {msg}\r\n".encode())
             sys.stdout.buffer.flush()
+
+    def _start_mic_monitor(self):
+        with self._mic_monitor_lock:
+            if self._exiting:
+                return
+            if self.mic_monitor is not None:
+                if self.mic_monitor.is_alive():
+                    return
+                self.mic_monitor = None
+            monitor = PipeWireMicMonitor(lambda muted: self._publish_mic_monitor_state(monitor, muted))
+            self.mic_monitor = monitor
+            try:
+                monitor.start()
+            except Exception:
+                if self.mic_monitor is monitor:
+                    self.mic_monitor = None
+                raise
+
+    def _publish_mic_monitor_state(self, monitor, muted: bool | None):
+        with self._mic_monitor_lock:
+            if self.mic_monitor is monitor:
+                self._set_system_mic_muted(muted)
+
+    def _stop_mic_monitor(self):
+        with self._mic_monitor_lock:
+            monitor = self.mic_monitor
+        if monitor is None:
+            return
+        monitor.stop()
+        monitor.join(timeout=2)
+        with self._mic_monitor_lock:
+            if self.mic_monitor is monitor:
+                self.mic_monitor = None
 
     def _toggle_listening(self):
         if self._exiting:
             return
-        was_listening = self.voice_thread.is_listening
         try:
             enabled = self.voice_thread.toggle_listening()
         except OSError as error:
             logger.error(f"Failed to acquire microphone: {error}")
-            return
-        if not was_listening and not enabled:
-            logger.warning("Microphone is already in use by another VSH session")
             return
         if enabled:
             self.voice_thread.suppress_input(0.6)
@@ -378,8 +489,11 @@ class PtyShell:
             )
             c = "1;35" if enabled else "36"
             self._notify(m, color=c)
-        if enabled and not self._exiting:
-            sys.stdout.buffer.write(b"\a")
+        if enabled:
+            with self._terminal_lock:
+                if not self._exiting:
+                    sys.stdout.buffer.write(b"\a")
+                    sys.stdout.buffer.flush()
 
     def _inject_command(self, cmd: str, expected_revision: int | None = None) -> bool:
         """Send text directly to the shell."""
@@ -396,37 +510,58 @@ class PtyShell:
         with self._input_lock:
             if expected_revision is not None:
                 try:
-                    foreground = os.tcgetpgrp(self.master_fd)
+                    owns_pty = os.tcgetpgrp(self.master_fd) == self.shell_pid
                 except OSError:
-                    foreground = None
-                if expected_revision != self._input_revision or foreground != self.shell_pid:
+                    owns_pty = False
+                prompt_safe = (
+                    self._prompt_markers_seen
+                    and owns_pty
+                    and self._prompt_ready
+                    and self._prompt_input_revision == self._input_revision
+                )
+                if expected_revision != self._input_revision or not prompt_safe:
                     logger.warning("Skipped voice command because terminal input or ownership changed")
+                    skipped = True
+                else:
+                    skipped = False
+            else:
+                skipped = False
+            if not skipped:
+                try:
+                    os.write(self.master_fd, cmd.encode())
+                    return True
+                except OSError as e:
+                    logger.error(f"Failed to write to PTY: {e}")
                     return False
-            try:
-                os.write(self.master_fd, cmd.encode())
-                return True
-            except OSError as e:
-                logger.error(f"Failed to write to PTY: {e}")
-                return False
+
+        with self._terminal_lock:
+            if not self._exiting:
+                sys.stdout.write(f"\r\nvsh: command not injected: {json.dumps(cmd.rstrip(), ensure_ascii=False)}\r\n")
+                sys.stdout.flush()
+        return False
 
     def _publish_reply(self, speech: str, command: str, expected_revision: int | None = None):
         """Publish speech and command as one ordered terminal update."""
-        if self._exiting:
-            return
-        if speech:
-            sys.stdout.write(f"\r\n{speech.rstrip()}\r\n")
-            sys.stdout.flush()
-        if command:
-            if expected_revision is None:
-                self._inject_command(command)
-            else:
-                self._inject_command(command, expected_revision)
+        with self._terminal_lock:
+            if self._exiting:
+                return
+            if speech:
+                sys.stdout.write(f"\r\n{speech.rstrip()}\r\n")
+                sys.stdout.flush()
+            if command:
+                if expected_revision is None:
+                    self._inject_command(command)
+                else:
+                    self._inject_command(command, expected_revision)
 
     def _cancel_processors(self):
         for processor in (self.voice_handler, self.thinker):
             cancel = getattr(processor, "cancel", None)
             if cancel is not None:
-                cancel()
+                try:
+                    cancel()
+                except Exception as error:
+                    logger.error(f"Failed to cancel processor during shutdown: {error}")
 
     def output_snapshot(self) -> bytes:
         with self._history_lock:
@@ -464,6 +599,17 @@ class PtyShell:
             except (ChildProcessError, OSError):
                 return
 
+    def _kill_foreground_process_group(self):
+        if self.master_fd is None or not self.shell_pid:
+            return
+        try:
+            process_group = os.tcgetpgrp(self.master_fd)
+            if process_group == self.shell_pid:
+                return
+            os.killpg(process_group, signal.SIGKILL)
+        except OSError:
+            pass
+
     def _start_http_server(self):
         if self.server_port is None or self._exiting:
             return
@@ -487,53 +633,52 @@ class PtyShell:
             try:
                 os.environ["VSH_ACTIVE"] = "1"
                 os.environ["VSH_ACTIVE_TTY"] = os.ttyname(sys.stdin.fileno())
-                os.execv(self.inner_shell, self.inner_shell_args)
+                os.execv(self.inner_shell, self._shell_exec_args())
             except Exception as e:
                 sys.stderr.write(f"\033[31m✗\033[0m Failed to start {self.inner_shell} · {e}\n")
                 os._exit(1)
         else:
             self.shell_pid = pid
-
-            signal.signal(signal.SIGINT, self._handle_sigint)
-            signal.signal(signal.SIGTERM, self._handle_sigint)
-            signal.signal(signal.SIGHUP, self._handle_sigint)
-            signal.signal(signal.SIGWINCH, self._handle_sigwinch)
-            self._handle_sigwinch(None, None)
-
-            self._setup_terminal()
-            self.indicator.select_mode(self.old_tty_attrs is not None)
-            self._start_http_server()
-
-            def async_bg_init():
-                if self._exiting:
-                    return
-                try:
-                    self.mic_monitor.start()
-                    if self._exiting:
-                        self.mic_monitor.stop()
-                        return
-                    self.voice_thread.start()
-                    if self._exiting:
-                        self.voice_thread.stop()
-                        return
-                    self.pipeline_thread = threading.Thread(target=self._pipeline_worker, daemon=True)
-                    self.pipeline_thread.start()
-                    self.shell_state = "idle"
-                    if self.verbose and not self._exiting:
-                        self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} or Ctrl+G to toggle.")
-                    if self.config.shell.voice_on_start and not self._exiting:
-                        self._toggle_listening()
-                except Exception as error:
-                    if not self._exiting:
-                        logger.error(f"Background initialization failed: {error}")
-
-            self.background_thread = threading.Thread(target=async_bg_init, daemon=True)
-            self.background_thread.start()
-
             try:
+                signal.signal(signal.SIGINT, self._handle_sigint)
+                signal.signal(signal.SIGTERM, self._handle_sigint)
+                signal.signal(signal.SIGHUP, self._handle_sigint)
+                signal.signal(signal.SIGWINCH, self._handle_sigwinch)
+                self._handle_sigwinch(None, None)
+
+                self._setup_terminal()
+                self.indicator.select_mode(self.old_tty_attrs is not None)
+                self._start_http_server()
+
+                def async_bg_init():
+                    if self._exiting:
+                        return
+                    try:
+                        self.voice_thread.start()
+                        if self._exiting:
+                            self.voice_thread.stop()
+                            return
+                        self.pipeline_thread = threading.Thread(target=self._pipeline_worker, daemon=True)
+                        self.pipeline_thread.start()
+                        self.shell_state = "idle"
+                        if self.verbose and not self._exiting:
+                            self._notify(f"VSH active. Press {self.config.keybinds.toggle_listen} or Ctrl+G to toggle.")
+                        if self.config.shell.voice_on_start and not self._exiting:
+                            self._toggle_listening()
+                    except Exception as error:
+                        if not self._exiting:
+                            logger.error(f"Background initialization failed: {error}")
+
+                self.background_thread = threading.Thread(target=async_bg_init, daemon=True)
+                self.background_thread.start()
                 self._io_loop()
             finally:
                 self._exiting = True
+                if self.background_thread is not None:
+                    try:
+                        self.background_thread.join()
+                    except RuntimeError:
+                        pass
                 self._cancel_processors()
                 if self.http_server is not None:
                     try:
@@ -550,13 +695,19 @@ class PtyShell:
                 except Exception:
                     pass
                 try:
-                    self.mic_monitor.stop()
-                except Exception:
-                    pass
-                try:
                     self.voice_thread.stop()
                 except Exception:
                     pass
+                try:
+                    if self.voice_thread.is_alive():
+                        self.voice_thread.join(timeout=3)
+                except Exception:
+                    pass
+                try:
+                    self._stop_mic_monitor()
+                except Exception:
+                    pass
+                self._kill_foreground_process_group()
                 self._restore_terminal()
                 if self.master_fd is not None:
                     try:
@@ -628,5 +779,8 @@ class PtyShell:
                 with self._history_lock:
                     self.output_history.append(data)
                 self._track_pty_controls(data)
-                sys.stdout.buffer.write(data)
-                sys.stdout.buffer.flush()
+                with self._terminal_lock:
+                    if self._exiting:
+                        break
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()

@@ -1,4 +1,3 @@
-import sys
 from collections.abc import Iterator
 
 from loguru import logger
@@ -60,18 +59,8 @@ class GcpSTTProvider:
                     final_transcripts.append(transcript.strip())
                     if on_phrase:
                         on_phrase(transcript.strip())
-                    sys.stderr.write("\r\033[K")
-                    sys.stderr.flush()
-                else:
-                    sys.stderr.write(f"\r\033[K• {transcript.strip()}")
-                    sys.stderr.flush()
 
         except Exception as e:
             logger.error(f"Error during GCP STT streaming: {e}")
-            sys.stderr.write("\r\033[K")
-            sys.stderr.flush()
-
-        sys.stderr.write("\r\033[K")
-        sys.stderr.flush()
 
         return " ".join(final_transcripts)

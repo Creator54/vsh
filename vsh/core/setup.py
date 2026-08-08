@@ -8,6 +8,7 @@ import stat
 import sys
 import tempfile
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 import pyaudio
@@ -152,8 +153,55 @@ def _atomic_write_text(path: Path, content: str, default_mode: int = 0o600) -> N
             pass
 
 
-def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: bool) -> bool:
-    rc_path = Path(rc_file).expanduser()
+def _atomic_write_texts(updates: list[tuple[Path, str, int]]) -> None:
+    """Publish complete files and roll back failures catchable by this process.
+
+    Process death between replacements can expose a mixed pair; separate files
+    cannot be atomically replaced as one filesystem operation.
+    """
+    staged = []
+    snapshots = []
+    try:
+        for path, content, default_mode in updates:
+            existed = path.exists()
+            snapshots.append((path, existed, path.read_text() if existed else "", default_mode))
+            mode = stat.S_IMODE(path.stat().st_mode) if existed else default_mode
+            fd, pending = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
+            pending_path = Path(pending)
+            staged.append((pending_path, path))
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(pending_path, mode)
+
+        replaced = []
+        try:
+            for pending, path in staged:
+                os.replace(pending, path)
+                replaced.append(path)
+        except BaseException:
+            for path, existed, content, default_mode in reversed(snapshots):
+                if path not in replaced:
+                    continue
+                if existed:
+                    _atomic_write_text(path, content, default_mode)
+                else:
+                    path.unlink(missing_ok=True)
+            raise
+
+        for directory in {path.parent for _, path in staged}:
+            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        for pending, _ in staged:
+            pending.unlink(missing_ok=True)
+
+
+def _render_shell_rc_bind(target: Path, rc_file: str, keybind_data: dict | None, set_default: bool) -> str | None:
     rc_name = os.path.basename(rc_file).lower()
     is_zsh = "zsh" in rc_name
     is_fish = "fish" in rc_name
@@ -162,23 +210,19 @@ def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: b
     if keybind_data:
         name = keybind_data["name"]
         if is_zsh:
-            b = keybind_data.get("zsh")
-            if not b:
-                sys.stdout.write(f"\nWarning: Could not auto-generate zsh binding for {name}.\n")
-                return False
-            append_cmd += f"bindkey -s '{b}' 'vsh --voice\\n'\n"
+            binding = keybind_data.get("zsh")
+            command = f"bindkey -s '{binding}' 'vsh --voice\\n'\n" if binding else ""
         elif is_fish:
-            b = keybind_data.get("fish")
-            if not b:
-                sys.stdout.write(f"\nWarning: Could not auto-generate fish binding for {name}.\n")
-                return False
-            append_cmd += f"bind {b} 'vsh --voice; commandline -f repaint'\n"
+            binding = keybind_data.get("fish")
+            command = f"bind {binding} 'vsh --voice; commandline -f repaint'\n" if binding else ""
         else:
-            b = keybind_data.get("bash")
-            if not b:
-                sys.stdout.write(f"\nWarning: Could not auto-generate bash binding for {name}.\n")
-                return False
-            append_cmd += f'bind \'"{b}":"vsh --voice\\n"\'\n'
+            binding = keybind_data.get("bash")
+            command = f'bind \'"{binding}":"vsh --voice\\n"\'\n' if binding else ""
+        if not command:
+            raise ValueError(
+                f"Could not auto-generate {('fish' if is_fish else 'zsh' if is_zsh else 'bash')} binding for {name}"
+            )
+        append_cmd += command
 
     if set_default:
         if is_fish:
@@ -191,28 +235,65 @@ def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: b
             append_cmd += 'if [ -t 1 ] && [ "${VSH_ACTIVE_TTY:-}" != "$(tty)" ]; then\n    exec vsh\nfi\n'
 
     if not append_cmd:
-        return True
+        return None
 
     block_start = "# --- vsh configuration start ---"
     block_end = "# --- vsh configuration end ---"
     block = f"\n{block_start}\n{append_cmd}{block_end}\n"
+    content = target.read_text() if target.exists() else ""
+    pattern = re.compile(f"\\n?{block_start}.*?{block_end}\\n?", re.DOTALL)
+    if pattern.search(content):
+        return pattern.sub(lambda _: block, content)
+    if set_default:
+        return block.lstrip() + ("\n" + content.lstrip() if content else "")
+    return content.rstrip() + block
 
+
+def _report_shell_rc_update(rc_file: str, keybind_data: dict | None, set_default: bool) -> None:
+    if keybind_data:
+        sys.stdout.write(f"\nAdded shortcut {keybind_data['name']} to {rc_file}!\n")
+    if set_default:
+        sys.stdout.write(f"\nSet vsh as default shell in {rc_file}!\n")
+
+
+def _write_setup_transaction(
+    config_path: Path,
+    config_content: str | Callable[[Path], str],
+    rc_file: str = "",
+    keybind_data: dict | None = None,
+    set_default: bool = False,
+) -> None:
+    """Validate and publish individually atomic setup files under their locks."""
+    if rc_file and Path(rc_file).expanduser().resolve() == config_path.resolve():
+        raise ValueError("Configuration and shell RC paths must be different")
+    with contextlib.ExitStack() as stack:
+        config_target = stack.enter_context(_locked_file(config_path))
+        rendered_config = config_content(config_target) if callable(config_content) else config_content
+        updates = [(config_target, rendered_config, 0o600)]
+        rendered_rc = None
+        if rc_file:
+            rc_target = stack.enter_context(_locked_file(Path(rc_file).expanduser()))
+            rendered_rc = _render_shell_rc_bind(rc_target, rc_file, keybind_data, set_default)
+            if rendered_rc is not None:
+                updates.append((rc_target, rendered_rc, 0o644))
+        _atomic_write_texts(updates)
+    if rendered_rc is not None:
+        _report_shell_rc_update(rc_file, keybind_data, set_default)
+
+
+def update_shell_rc_bind(rc_file: str, keybind_data: dict | None, set_default: bool) -> bool:
+    rc_path = Path(rc_file).expanduser()
     try:
         with _locked_file(rc_path) as target:
-            content = target.read_text() if target.exists() else ""
-            pattern = re.compile(f"\\n?{block_start}.*?{block_end}\\n?", re.DOTALL)
-            if pattern.search(content):
-                new_content = pattern.sub(lambda _: block, content)
-            elif set_default:
-                new_content = block.lstrip() + ("\n" + content.lstrip() if content else "")
-            else:
-                new_content = content.rstrip() + block
-            _atomic_write_text(target, new_content, default_mode=0o644)
-        if keybind_data:
-            sys.stdout.write(f"\nAdded shortcut {keybind_data['name']} to {rc_file}!\n")
-        if set_default:
-            sys.stdout.write(f"\nSet vsh as default shell in {rc_file}!\n")
+            content = _render_shell_rc_bind(target, rc_file, keybind_data, set_default)
+            if content is not None:
+                _atomic_write_text(target, content, default_mode=0o644)
+        if content is not None:
+            _report_shell_rc_update(rc_file, keybind_data, set_default)
         return True
+    except ValueError as error:
+        sys.stdout.write(f"\nWarning: {error}.\n")
+        return False
     except Exception as e:
         sys.stdout.write(f"\nFailed to write shortcut: {e}\n")
         return False
@@ -254,47 +335,61 @@ def _dump_toml(data: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_keybind_config(target: Path, keybind_data: dict) -> str:
+    with target.open("rb") as stream:
+        data = tomllib.load(stream)
+
+    keybinds = dict(data.get("keybinds", {}))
+    keybinds["toggle_listen"] = keybind_data["name"]
+    keybinds["toggle_listen_triggers"] = keybind_data["triggers"]
+
+    lines = target.read_text().splitlines()
+    output = []
+    index = 0
+    in_keybinds = False
+    replaced = False
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped == "[keybinds]":
+            output.append("[keybinds]")
+            output.extend(f"{key} = {_toml_value(value)}" for key, value in keybinds.items())
+            replaced = True
+            in_keybinds = True
+            index += 1
+            continue
+        if in_keybinds:
+            if stripped.startswith("[") and stripped.endswith("]"):
+                in_keybinds = False
+                output.append(line)
+            index += 1
+            continue
+        output.append(line)
+        index += 1
+
+    if not replaced:
+        if output and output[-1].strip():
+            output.append("")
+        output.append("[keybinds]")
+        output.extend(f"{key} = {_toml_value(value)}" for key, value in keybinds.items())
+
+    return "\n".join(output) + "\n"
+
+
 def update_keybind_config(config_path: Path, keybind_data: dict) -> None:
     """Update only the keybind table, preserving the rest of the file."""
     with _locked_file(config_path) as target:
-        with target.open("rb") as stream:
-            data = tomllib.load(stream)
+        _atomic_write_text(target, _render_keybind_config(target, keybind_data))
 
-        keybinds = dict(data.get("keybinds", {}))
-        keybinds["toggle_listen"] = keybind_data["name"]
-        keybinds["toggle_listen_triggers"] = keybind_data["triggers"]
 
-        lines = target.read_text().splitlines()
-        output = []
-        index = 0
-        in_keybinds = False
-        replaced = False
-        while index < len(lines):
-            line = lines[index]
-            stripped = line.strip()
-            if stripped == "[keybinds]":
-                output.append("[keybinds]")
-                output.extend(f"{key} = {_toml_value(value)}" for key, value in keybinds.items())
-                replaced = True
-                in_keybinds = True
-                index += 1
-                continue
-            if in_keybinds:
-                if stripped.startswith("[") and stripped.endswith("]"):
-                    in_keybinds = False
-                    output.append(line)
-                index += 1
-                continue
-            output.append(line)
-            index += 1
-
-        if not replaced:
-            if output and output[-1].strip():
-                output.append("")
-            output.append("[keybinds]")
-            output.extend(f"{key} = {_toml_value(value)}" for key, value in keybinds.items())
-
-        _atomic_write_text(target, "\n".join(output) + "\n")
+def update_keybind_setup(config_path: Path, keybind_data: dict, rc_file: str = "") -> None:
+    _write_setup_transaction(
+        config_path,
+        lambda target: _render_keybind_config(target, keybind_data),
+        rc_file,
+        keybind_data,
+        False,
+    )
 
 
 def interactive_setup(section: str | None = None, *, skip_if_configured: bool = False) -> None:
@@ -556,6 +651,7 @@ def _interactive_setup(section: str | None, cfg_path: Path) -> None:
         "triggers": get_val("keybinds", "toggle_listen_triggers", default=[b"\x1c".hex(), b"\x1b[92;5u".hex()]),
         "bash": "\\C-\\",
         "zsh": "^\\\\",
+        "fish": "\\c\\\\",
     }
 
     add_shortcut = False
@@ -663,8 +759,7 @@ def _interactive_setup(section: str | None, cfg_path: Path) -> None:
             elif thinker == "ollama" and model:
                 llm["model"] = model
 
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    with _locked_file(cfg_path) as target:
+    def render_config(target: Path) -> str:
         latest = {}
         if target.exists():
             try:
@@ -673,7 +768,17 @@ def _interactive_setup(section: str | None, cfg_path: Path) -> None:
             except Exception:
                 pass
         apply_updates(latest)
-        _atomic_write_text(target, _dump_toml(latest))
-    if rc_file:
-        update_shell_rc_bind(rc_file, keybind_data if add_shortcut else None, set_default)
+        return _dump_toml(latest)
+
+    try:
+        _write_setup_transaction(
+            cfg_path,
+            render_config,
+            rc_file,
+            keybind_data if add_shortcut else None,
+            set_default,
+        )
+    except Exception as error:
+        sys.stdout.write(f"\nFailed to update configuration: {error}\n")
+        return
     sys.stdout.write(f"\nConfiguration successfully written to {cfg_path}\n")

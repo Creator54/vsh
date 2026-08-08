@@ -290,8 +290,7 @@ def _get_typer_app():
             _setup_lock,
             capture_keybind,
             get_default_rc,
-            update_keybind_config,
-            update_shell_rc_bind,
+            update_keybind_setup,
         )
 
         sys.stdout.write("Keybind Setup Wizard\n")
@@ -335,9 +334,7 @@ def _get_typer_app():
                 sys.stdout.write("Config file was removed during setup. Please run 'vsh setup' first.\n")
                 return
             try:
-                update_keybind_config(config_path, keybind_data)
-                if rc_file:
-                    update_shell_rc_bind(rc_file, keybind_data, False)
+                update_keybind_setup(config_path, keybind_data, rc_file)
                 sys.stdout.write("Updated config.toml with new keybind.\n")
             except Exception as e:
                 sys.stdout.write(f"Failed to update keybind: {e}\n")

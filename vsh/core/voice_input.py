@@ -44,6 +44,8 @@ class VoiceInputThread(threading.Thread):
         vad_silence_limit=15,
         volume_callback=None,
         state_callback=None,
+        capture_started_callback=None,
+        capture_stopped_callback=None,
     ):
         super().__init__(name="VoiceInputThread", daemon=True)
         self.stt_queue = stt_queue
@@ -54,6 +56,8 @@ class VoiceInputThread(threading.Thread):
         self.vad_silence_limit = vad_silence_limit
         self.volume_callback = volume_callback
         self.state_callback = state_callback
+        self.capture_started_callback = capture_started_callback
+        self.capture_stopped_callback = capture_stopped_callback
 
         self.is_listening = False
         self.should_exit = False
@@ -68,13 +72,18 @@ class VoiceInputThread(threading.Thread):
         self._processing_lock = threading.Lock()
         self._active_stream = None
         self._microphone_lease = None
+        self._listen_generation = 0
 
     def suppress_input(self, duration: float = 0.6):
         """Ignore brief audio caused by a known keypress."""
-        self._suppress_until = max(self._suppress_until, time.monotonic() + duration)
+        deadline = time.monotonic() + duration
+        with self._processing_lock:
+            self._suppress_until = max(self._suppress_until, deadline)
 
     def _input_suppressed(self) -> bool:
-        return time.monotonic() < self._suppress_until
+        now = time.monotonic()
+        with self._processing_lock:
+            return now < self._suppress_until
 
     def load_model(self):
         """Load the speech model on first use."""
@@ -93,47 +102,46 @@ class VoiceInputThread(threading.Thread):
 
     def toggle_listening(self) -> bool:
         """Toggle listening state and return the new state."""
-        from vsh.core.microphone import acquire_microphone, release_microphone
-
         with self._toggle_lock:
-            if self.is_listening:
-                self.is_listening = False
-                release_microphone(self._microphone_lease)
-                self._microphone_lease = None
-            else:
-                lease = acquire_microphone()
-                if lease is None:
-                    return False
-                self._microphone_lease = lease
-                self.is_listening = True
-        self._toggle_event.set()
-        if self.state_callback:
-            self.state_callback(VoiceState.IDLE if self.is_listening else None)
-        return self.is_listening
+            self.is_listening = not self.is_listening
+            self._listen_generation += 1
+            listening = self.is_listening
+            if not listening:
+                self._abort_active_stream()
+            self._toggle_event.set()
+            if self.state_callback:
+                self.state_callback(VoiceState.IDLE if listening else None)
+            return listening
 
     def set_system_mic_muted(self, muted: bool | None):
-        self.system_mic_muted = muted
+        with self._processing_lock:
+            self.system_mic_muted = muted
+            self._sync_stream_locked()
         self._toggle_event.set()
 
     def stop(self):
         """Signal the thread to shut down completely without blocking."""
-        from vsh.core.microphone import release_microphone
-
         self.should_exit = True
         with self._toggle_lock:
             self.is_listening = False
-            release_microphone(self._microphone_lease)
-            self._microphone_lease = None
-        stream = self._active_stream
+            self._listen_generation += 1
+        self._abort_active_stream()
+        self._toggle_event.set()
+
+    def _abort_active_stream(self):
+        with self._processing_lock:
+            stream = self._active_stream
         if stream is not None:
             try:
                 stream.abort()
             except Exception:
                 pass
-        self._toggle_event.set()
 
-    def _capture_enabled(self) -> bool:
-        return self.is_listening and self.system_mic_muted is not True
+    def _session_enabled(self, generation: int | None = None) -> bool:
+        return self.is_listening and (generation is None or generation == self._listen_generation)
+
+    def _capture_enabled(self, generation: int | None = None) -> bool:
+        return self._session_enabled(generation) and self.system_mic_muted is not True
 
     def _resting_state(self) -> VoiceState | None:
         return VoiceState.IDLE if self.is_listening else None
@@ -141,8 +149,16 @@ class VoiceInputThread(threading.Thread):
     def _set_active_stream(self, stream):
         with self._processing_lock:
             self._active_stream = stream
-            if stream is not None and self.is_processing:
+            if stream is not None and (self.is_processing or self.system_mic_muted is True):
                 stream.suspend()
+
+    def _sync_stream_locked(self):
+        if self._active_stream is None:
+            return
+        if self.is_processing or self.system_mic_muted is True:
+            self._active_stream.suspend()
+        else:
+            self._active_stream.resume()
 
     def set_processing(self, processing: bool):
         """Pause capture while a voice request is being handled."""
@@ -150,20 +166,17 @@ class VoiceInputThread(threading.Thread):
             if self.is_processing == processing:
                 return
             self.is_processing = processing
-            if self._active_stream is not None:
-                if processing:
-                    self._active_stream.suspend()
-                else:
-                    self._active_stream.resume()
+            self._sync_stream_locked()
+        self._toggle_event.set()
 
     def _finish_processing(self):
         self.set_processing(False)
         if self.state_callback:
             self.state_callback(self._resting_state())
 
-    def process_once(self, stream) -> bool:
+    def process_once(self, stream, generation: int | None = None) -> bool:
         """Capture and transcribe one phrase, returning whether it was queued."""
-        if not self._capture_enabled():
+        if not self._capture_enabled(generation):
             self._finish_processing()
             return False
 
@@ -175,12 +188,12 @@ class VoiceInputThread(threading.Thread):
             threshold=self.vad_threshold,
             silence_limit=self.vad_silence_limit,
             verbose=self.verbose,
-            stop_check=lambda: not self._capture_enabled() or self.is_processing,
+            stop_check=lambda: not self._capture_enabled(generation) or self.is_processing,
             ignore_check=self._input_suppressed,
             volume_callback=self.volume_callback,
             activity_callback=activity_changed,
         )
-        if not capture.accepted or not self._capture_enabled():
+        if not capture.accepted or not self._capture_enabled(generation):
             self._finish_processing()
             return False
 
@@ -201,7 +214,7 @@ class VoiceInputThread(threading.Thread):
             self._finish_processing()
             raise
 
-        if not self._capture_enabled():
+        if not self._capture_enabled(generation):
             self._finish_processing()
             return False
         if not _is_valid_transcript(text):
@@ -215,7 +228,7 @@ class VoiceInputThread(threading.Thread):
 
     def run(self):
         while not self.should_exit:
-            if not self._capture_enabled():
+            if not self._session_enabled():
                 self._toggle_event.wait()
                 self._toggle_event.clear()
                 continue
@@ -225,21 +238,63 @@ class VoiceInputThread(threading.Thread):
 
             try:
                 self.load_model()
-                if not self._capture_enabled():
+                if not self._session_enabled():
                     continue
+                with self._toggle_lock:
+                    generation = self._listen_generation
+
+                from vsh.core.microphone import acquire_microphone, release_microphone
+
+                lease = acquire_microphone()
+                if lease is None:
+                    disabled = False
+                    with self._toggle_lock:
+                        if generation == self._listen_generation and self.is_listening:
+                            self.is_listening = False
+                            self._listen_generation += 1
+                            disabled = True
+                    if disabled:
+                        logger.warning("Microphone is already in use by another VSH session")
+                        if self.state_callback:
+                            self.state_callback(None)
+                    continue
+
+                with self._toggle_lock:
+                    keep_lease = self._session_enabled(generation) and not self.should_exit
+                    if keep_lease:
+                        self._microphone_lease = lease
+                if not keep_lease:
+                    release_microphone(lease)
+                    continue
+
                 from vsh.core.audio import MicStream
 
-                with MicStream(device_index=self.device_index) as stream:
-                    self._set_active_stream(stream)
-                    try:
-                        while self._capture_enabled() and not self.should_exit:
-                            if self.is_processing:
-                                time.sleep(0.1)
-                                continue
+                monitor_started = False
+                try:
+                    with MicStream(device_index=self.device_index) as stream:
+                        self._set_active_stream(stream)
+                        try:
+                            if self.capture_started_callback:
+                                self.capture_started_callback()
+                            monitor_started = True
+                            while self._session_enabled(generation) and not self.should_exit:
+                                if not self._capture_enabled(generation) or self.is_processing:
+                                    self._toggle_event.wait(timeout=0.1)
+                                    self._toggle_event.clear()
+                                    continue
 
-                            self.process_once(stream)
+                                self.process_once(stream, generation)
+                        finally:
+                            self._set_active_stream(None)
+                finally:
+                    try:
+                        if monitor_started and self.capture_stopped_callback:
+                            self.capture_stopped_callback()
                     finally:
-                        self._set_active_stream(None)
+                        with self._toggle_lock:
+                            if self._microphone_lease is lease:
+                                self._microphone_lease = None
+                        release_microphone(lease)
 
             except Exception as e:
                 self._finish_processing()

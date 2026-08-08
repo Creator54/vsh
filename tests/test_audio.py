@@ -1,10 +1,58 @@
+import os
 import queue
 import threading
+import wave
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
-from vsh.core.audio import MicStream, detect_phrase, synthesize_pcm16
+from vsh.core.audio import MicStream, detect_phrase, no_stderr, save_audio, synthesize_pcm16
+
+
+def test_no_stderr_does_not_hide_process_output():
+    read_fd, write_fd = os.pipe()
+    saved_stderr = os.dup(2)
+    try:
+        os.dup2(write_fd, 2)
+        with no_stderr():
+            os.write(2, b"kept")
+    finally:
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stderr)
+        os.close(write_fd)
+
+    try:
+        assert os.read(read_fd, 4) == b"kept"
+    finally:
+        os.close(read_fd)
+
+
+def test_save_audio_publishes_only_the_completed_wav(tmp_path):
+    target = tmp_path / "speech.wav"
+    target.write_bytes(b"old complete file")
+    write_started = threading.Event()
+    finish_write = threading.Event()
+    real_writeframes = wave.Wave_write.writeframes
+
+    def paused_writeframes(writer, data):
+        write_started.set()
+        assert finish_write.wait(timeout=1)
+        return real_writeframes(writer, data)
+
+    with patch.object(wave.Wave_write, "writeframes", paused_writeframes):
+        worker = threading.Thread(target=save_audio, args=(str(target), b"\0\0" * 100, 16000))
+        worker.start()
+        assert write_started.wait(timeout=1)
+        visible_during_write = target.read_bytes()
+        finish_write.set()
+        worker.join(timeout=1)
+
+    assert not worker.is_alive()
+    assert visible_during_write == b"old complete file"
+    with wave.open(str(target), "rb") as saved:
+        assert saved.getframerate() == 16000
+        assert saved.readframes(saved.getnframes()) == b"\0\0" * 100
 
 
 def test_synthesize_pcm16_preserves_provider_sample_rate():

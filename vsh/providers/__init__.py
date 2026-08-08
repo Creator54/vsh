@@ -1,6 +1,7 @@
+from vsh.core.config import VshConfig
 from vsh.core.logger import logger
 
-from vsh.core.config import VshConfig
+
 def resolve_stt(config: VshConfig):
     provider = config.stt.provider
     if not provider:

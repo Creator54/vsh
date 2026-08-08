@@ -6,7 +6,6 @@ import fcntl  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import shutil  # noqa: E402
-import sys  # noqa: E402
 from collections.abc import Iterator  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -31,9 +30,6 @@ class VoskSTTProvider:
 
     def _ensure_model(self, model_path: str | Path, model_url: str | None):
         model_path = Path(model_path)
-        if model_path.exists():
-            return
-
         parent = model_path.parent
         parent.mkdir(parents=True, exist_ok=True)
         lock_path = parent / f".{model_path.name}.lock"
@@ -47,6 +43,7 @@ class VoskSTTProvider:
                 logger.info(f"Waiting for another VSH session to install {self.model_name}...")
                 fcntl.flock(lock, fcntl.LOCK_EX)
 
+            shutil.rmtree(staging, ignore_errors=True)
             if model_path.exists():
                 return
             if not model_url:
@@ -54,7 +51,6 @@ class VoskSTTProvider:
                     f"Vosk model '{self.model_name}' is not installed at '{model_path}' and no download URL is configured."
                 )
 
-            shutil.rmtree(staging, ignore_errors=True)
             extracted = staging / "extracted"
             archive = staging / "model.zip"
             extracted.mkdir(parents=True)
@@ -75,23 +71,12 @@ class VoskSTTProvider:
         import urllib.request
 
         with urllib.request.urlopen(model_url, timeout=30) as r, archive.open("wb") as f:
-            total_size = int(r.headers.get("Content-Length", 0))
-            downloaded = 0
             chunk_size = 128 * 1024
             while True:
                 chunk = r.read(chunk_size)
                 if not chunk:
                     break
                 f.write(chunk)
-                downloaded += len(chunk)
-                if total_size:
-                    percent = int((downloaded / total_size) * 100)
-                    sys.stderr.write(
-                        f"\rDownloading model {self.model_name}... {percent}% ({downloaded / (1024 * 1024):.1f}MB / {total_size / (1024 * 1024):.1f}MB)"
-                    )
-                    sys.stderr.flush()
-            if total_size:
-                sys.stderr.write("\n")
 
     def transcribe_stream(self, audio_stream: Iterator[bytes], on_phrase=None, rate: int = 16000) -> str:
         rec, res = KaldiRecognizer(self.model, rate), []
@@ -105,14 +90,6 @@ class VoskSTTProvider:
                     res.append(t)
                     if on_phrase:
                         on_phrase(t)
-            else:
-                p = json.loads(rec.PartialResult()).get("partial", "")
-                if p:
-                    sys.stderr.write(f"\r\033[K• {p}")
-                    sys.stderr.flush()
-
-        if self.model_name:
-            sys.stderr.write("\r\033[K")  # Clear partials
         logger.debug(f"Vosk stream finished. Total chunks: {chunk_count}")
         f = json.loads(rec.FinalResult()).get("text", "")
         if f:

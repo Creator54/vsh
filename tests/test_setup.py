@@ -10,6 +10,7 @@ import vsh.core.setup as setup_mod
 from vsh.core.setup import (
     _locked_file,
     _setup_lock,
+    _write_setup_transaction,
     get_default_rc,
     interactive_setup,
     update_keybind_config,
@@ -151,6 +152,77 @@ def test_setup_lock_keeps_config_and_shell_binding_as_one_transaction(tmp_path: 
     second.join(timeout=1)
 
     assert config.read_text() == shell_rc.read_text() == "second"
+
+
+def test_setup_transaction_validates_shell_binding_before_writing_config(tmp_path: Path):
+    config = tmp_path / "config.toml"
+    shell_rc = tmp_path / "config.fish"
+    config.write_text("old config")
+    shell_rc.write_text("old rc")
+    unsupported = {"name": "custom", "fish": None}
+
+    try:
+        _write_setup_transaction(config, "new config", str(shell_rc), unsupported, False)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsupported binding was accepted")
+
+    assert config.read_text() == "old config"
+    assert shell_rc.read_text() == "old rc"
+
+
+def test_setup_transaction_rolls_back_when_second_replace_fails(tmp_path: Path):
+    config = tmp_path / "config.toml"
+    shell_rc = tmp_path / "config.fish"
+    config.write_text("old config")
+    shell_rc.write_text("old rc")
+    keybind = {"name": "ctrl+]", "fish": "\\c]"}
+    real_replace = os.replace
+    failed = False
+
+    def fail_rc_once(source, target):
+        nonlocal failed
+        if Path(target) == shell_rc and not failed:
+            failed = True
+            raise OSError("injected failure")
+        return real_replace(source, target)
+
+    with patch("vsh.core.setup.os.replace", side_effect=fail_rc_once):
+        try:
+            _write_setup_transaction(config, "new config", str(shell_rc), keybind, False)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("replace failure was ignored")
+
+    assert config.read_text() == "old config"
+    assert shell_rc.read_text() == "old rc"
+
+
+def test_setup_transaction_rolls_back_when_interrupted_during_replace(tmp_path: Path):
+    config = tmp_path / "config.toml"
+    shell_rc = tmp_path / "config.fish"
+    config.write_text("old config")
+    shell_rc.write_text("old rc")
+    keybind = {"name": "ctrl+]", "fish": "\\c]"}
+    real_replace = os.replace
+
+    def interrupt_rc(source, target):
+        if Path(target) == shell_rc:
+            raise KeyboardInterrupt
+        return real_replace(source, target)
+
+    with patch("vsh.core.setup.os.replace", side_effect=interrupt_rc):
+        try:
+            _write_setup_transaction(config, "new config", str(shell_rc), keybind, False)
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("interrupt was ignored")
+
+    assert config.read_text() == "old config"
+    assert shell_rc.read_text() == "old rc"
 
 
 def test_fish_shell_update_replaces_one_managed_block(tmp_path: Path):

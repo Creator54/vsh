@@ -225,6 +225,7 @@ class TestCliThinker(unittest.TestCase):
         self.assertEqual(result, "echo 'Command timed out'\n")
         process.stdout.close.assert_called_once_with()
         process.stderr.close.assert_called_once_with()
+        process.wait.assert_called()
 
     def test_cancel_stops_and_reaps_active_process_group(self):
         thinker = CliThinker(command="sleep 30", timeout=60)

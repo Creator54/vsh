@@ -19,7 +19,7 @@ class CliThinker:
     def _kill(process: subprocess.Popen) -> None:
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        except OSError:
             pass
 
     @staticmethod
@@ -31,6 +31,22 @@ class CliThinker:
                 except OSError:
                     pass
 
+    @classmethod
+    def _reap(cls, process: subprocess.Popen) -> None:
+        try:
+            process.wait(timeout=1)
+            return
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
     def cancel(self) -> None:
         """Cancel the active command and prevent new commands during shutdown."""
         self._cancelled.set()
@@ -38,10 +54,7 @@ class CliThinker:
             process = self._process
         if process is not None:
             self._kill(process)
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
+            self._reap(process)
             self._close_pipes(process)
 
     def ask(self, prompt: str) -> str:
@@ -79,6 +92,7 @@ class CliThinker:
                     process.communicate(timeout=1)
                 except (subprocess.TimeoutExpired, OSError, ValueError):
                     self._close_pipes(process)
+                    self._reap(process)
                 return "echo 'Command timed out'\n"
             except (OSError, ValueError):
                 if self._cancelled.is_set():

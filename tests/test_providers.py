@@ -114,6 +114,47 @@ class TestProviders(unittest.TestCase):
             self.assertTrue(all(not thread.is_alive() for thread in threads))
 
     @patch("supertonic.TTS")
+    def test_supertonic_waits_for_download_finalization_after_files_appear(self, mock_tts_class):
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory) / "model"
+            model_dir.mkdir()
+            complete = model_dir / "complete"
+            files_visible = threading.Event()
+            finish_download = threading.Event()
+            engine_started = threading.Event()
+
+            def download(_path):
+                complete.touch()
+                files_visible.set()
+                assert finish_download.wait(timeout=2)
+
+            loader = ModuleType("supertonic.loader")
+            loader.get_cache_dir = lambda: model_dir
+            loader.has_all_onnx_modules = lambda _path: complete.exists()
+            loader.download_model = download
+            engine = MagicMock(sample_rate=44100)
+            engine.get_voice_style.return_value = object()
+            wav = MagicMock()
+            wav.flatten.return_value = np.zeros(1)
+            engine.synthesize.return_value = (wav, 1.0)
+            mock_tts_class.side_effect = lambda **_kwargs: engine_started.set() or engine
+            providers = (SupertonicTTSProvider(), SupertonicTTSProvider())
+            threads = [threading.Thread(target=provider.synthesize, args=("hello",)) for provider in providers]
+
+            with patch.dict(sys.modules, {"supertonic.loader": loader}):
+                threads[0].start()
+                self.assertTrue(files_visible.wait(timeout=1))
+                threads[1].start()
+                started_early = engine_started.wait(timeout=0.1)
+                finish_download.set()
+                for thread in threads:
+                    thread.join(timeout=2)
+
+            self.assertFalse(started_early)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(mock_tts_class.call_count, 2)
+
+    @patch("supertonic.TTS")
     def test_failed_supertonic_download_releases_install_lock(self, mock_tts_class):
         with tempfile.TemporaryDirectory() as directory:
             model_dir = Path(directory) / "model"
@@ -227,6 +268,21 @@ class TestProviders(unittest.TestCase):
             provider = VoskSTTProvider(model_name="installed-model")
             self.assertEqual(provider.model_name, "installed-model")
             mock_model_cls.assert_called_once()
+
+    @patch("vsh.providers.vosk.Model")
+    def test_existing_vosk_model_cleans_stale_install_staging(self, _mock_model_cls):
+        from vsh.providers.vosk import VoskSTTProvider
+
+        with tempfile.TemporaryDirectory() as home, patch("pathlib.Path.home", return_value=Path(home)):
+            parent = Path(home) / ".local/share/vsh/models"
+            (parent / "installed-model").mkdir(parents=True)
+            staging = parent / ".installed-model.installing"
+            staging.mkdir()
+            (staging / "model.zip").write_bytes(b"stale")
+
+            VoskSTTProvider(model_name="installed-model")
+
+            self.assertFalse(staging.exists())
 
     def test_vosk_download_uses_verified_tls(self):
         from vsh.providers.vosk import VoskSTTProvider
