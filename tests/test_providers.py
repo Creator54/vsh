@@ -1,6 +1,7 @@
 import base64
 import fcntl
 import multiprocessing
+import os
 import sys
 import tempfile
 import threading
@@ -263,11 +264,27 @@ class TestProviders(unittest.TestCase):
     def test_vosk_provider_loads_existing_local_model(self, mock_model_cls):
         from vsh.providers.vosk import VoskSTTProvider
 
-        with tempfile.TemporaryDirectory() as home, patch("pathlib.Path.home", return_value=Path(home)):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch.dict(os.environ, {"XDG_DATA_HOME": ""}),
+            patch("pathlib.Path.home", return_value=Path(home)),
+        ):
             (Path(home) / ".local/share/vsh/models/installed-model").mkdir(parents=True)
             provider = VoskSTTProvider(model_name="installed-model")
             self.assertEqual(provider.model_name, "installed-model")
             mock_model_cls.assert_called_once()
+
+    @patch("vsh.providers.vosk.Model")
+    def test_vosk_provider_honors_xdg_data_home(self, mock_model_cls):
+        from vsh.providers.vosk import VoskSTTProvider
+
+        with tempfile.TemporaryDirectory() as data_home, patch.dict(os.environ, {"XDG_DATA_HOME": data_home}):
+            model_path = Path(data_home) / "vsh/models/installed-model"
+            model_path.mkdir(parents=True)
+
+            VoskSTTProvider(model_name="installed-model")
+
+        mock_model_cls.assert_called_once_with(str(model_path))
 
     @patch("vsh.providers.vosk.Model")
     def test_existing_vosk_model_cleans_stale_install_staging(self, _mock_model_cls):

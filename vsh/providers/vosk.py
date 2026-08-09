@@ -23,8 +23,9 @@ class VoskSTTProvider:
         self.model_name = model_name
         self.model_url = model_url
 
-        # Use XDG-compatible path so models work regardless of install method
-        model_path = Path.home() / ".local" / "share" / "vsh" / "models" / self.model_name
+        data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+        model_path = data_home / "vsh" / "models" / self.model_name
+
         self._ensure_model(model_path, self.model_url)
         self.model = Model(str(model_path))
 
