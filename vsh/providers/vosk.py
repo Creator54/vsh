@@ -63,7 +63,7 @@ class VoskSTTProvider:
                 if not staged_model.is_dir():
                     raise ValueError(f"Downloaded archive does not contain {model_path.name!r}")
                 os.replace(staged_model, model_path)
-                logger.success("Model ready.")
+                logger.info("Model ready.")
             finally:
                 shutil.rmtree(staging, ignore_errors=True)
 

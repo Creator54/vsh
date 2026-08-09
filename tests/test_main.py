@@ -1,6 +1,10 @@
+import os
+import runpy
+import sys
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
@@ -56,6 +60,31 @@ def test_default_shell_arguments_include_argv_zero():
     shell = PtyShell(VshConfig())
 
     assert shell.inner_shell_args == [shell.inner_shell]
+
+
+def test_module_fast_path_configures_logging(monkeypatch):
+    from loguru import logger
+
+    from vsh.core import config as config_module
+
+    config = VshConfig()
+    config.llm.provider = ""
+    monkeypatch.setattr(sys, "argv", ["vsh"])
+    monkeypatch.delenv("VSH_ACTIVE_TTY", raising=False)
+    monkeypatch.setattr(config_module, "load_config", lambda: config)
+    monkeypatch.setattr(PtyShell, "run", lambda _self: None)
+    monkeypatch.setattr(os, "_exit", lambda _code: None)
+
+    with (
+        patch.object(logger, "remove") as remove,
+        patch.object(logger, "add"),
+        patch.object(logger, "level"),
+        patch("vosk.SetLogLevel") as set_vosk_log_level,
+    ):
+        runpy.run_path(str(Path(main_module.__file__)), run_name="__main__")
+
+    remove.assert_called_once_with()
+    set_vosk_log_level.assert_called_once_with(-1)
 
 
 def test_unknown_command_returns_usage_error():

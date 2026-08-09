@@ -2,6 +2,7 @@ import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 import contextlib  # noqa: E402
+import ctypes  # noqa: E402
 import os  # noqa: E402
 import queue  # noqa: E402
 import stat  # noqa: E402
@@ -19,6 +20,12 @@ from loguru import logger  # noqa: E402
 
 _VOICE_BAND_MIN_RATIO = 0.20
 _VOICE_BAND_SMOOTH_FRAMES = 5
+_ALSA_ERROR_HANDLER = ctypes.CFUNCTYPE(
+    None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p
+)
+_JACK_MESSAGE_HANDLER = ctypes.CFUNCTYPE(None, ctypes.c_char_p)
+_IGNORE_ALSA_ERROR = _ALSA_ERROR_HANDLER(lambda *_args: None)
+_IGNORE_JACK_MESSAGE = _JACK_MESSAGE_HANDLER(lambda _message: None)
 
 
 @dataclass(frozen=True)
@@ -181,7 +188,30 @@ def detect_phrase(
 
 
 def no_stderr():
-    """Retained for callers; redirecting process-wide stderr is thread-unsafe."""
+    """Silence native audio diagnostics without redirecting process stderr."""
+    handlers = (
+        ("libasound.so.2", (("snd_lib_error_set_handler", _IGNORE_ALSA_ERROR),)),
+        (
+            "libjack.so.0",
+            (
+                ("jack_set_error_function", _IGNORE_JACK_MESSAGE),
+                ("jack_set_info_function", _IGNORE_JACK_MESSAGE),
+            ),
+        ),
+    )
+    for library_name, callbacks in handlers:
+        try:
+            library = ctypes.CDLL(library_name)
+        except OSError:
+            continue
+        for setter_name, handler in callbacks:
+            try:
+                setter = getattr(library, setter_name)
+            except AttributeError:
+                continue
+            setter.argtypes = [ctypes.c_void_p]
+            setter.restype = None
+            setter(ctypes.cast(handler, ctypes.c_void_p))
     return contextlib.nullcontext()
 
 

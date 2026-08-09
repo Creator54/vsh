@@ -3,11 +3,12 @@ import queue
 import threading
 import wave
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
+from vsh.core import audio
 from vsh.core.audio import MicStream, detect_phrase, no_stderr, save_audio, synthesize_pcm16
 
 
@@ -27,6 +28,20 @@ def test_no_stderr_does_not_hide_process_output():
         assert os.read(read_fd, 4) == b"kept"
     finally:
         os.close(read_fd)
+
+
+def test_no_stderr_installs_native_audio_error_handlers(monkeypatch):
+    alsa = MagicMock()
+    jack = MagicMock()
+    libraries = {"libasound.so.2": alsa, "libjack.so.0": jack}
+    monkeypatch.setattr(audio.ctypes, "CDLL", lambda name: libraries[name])
+
+    with no_stderr():
+        pass
+
+    alsa.snd_lib_error_set_handler.assert_called_once()
+    jack.jack_set_error_function.assert_called_once()
+    jack.jack_set_info_function.assert_called_once()
 
 
 def test_save_audio_publishes_only_the_completed_wav(tmp_path):

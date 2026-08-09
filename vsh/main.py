@@ -360,6 +360,7 @@ def __getattr__(name: str):
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
+        setup_logger(False)
         if _is_vsh_active_on_this_terminal():
             sys.stderr.write("Already running inside VSH on this terminal\n")
             sys.exit(0)
