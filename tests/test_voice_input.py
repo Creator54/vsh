@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vsh.core.audio import PhraseCapture
+from vsh.core.config import VshConfig
 from vsh.core.microphone import acquire_microphone, release_microphone
 from vsh.core.voice_input import VoiceInputThread, VoiceState, _is_silence_hallucination, _is_valid_transcript
 
@@ -70,6 +71,29 @@ def test_toggle_does_not_load_the_model_on_the_terminal_thread(tmp_path: Path):
             assert thread.toggle_listening()
             assert states == [VoiceState.IDLE]
             thread.stop()
+
+
+def test_model_initialization_failure_disables_listening_without_retry():
+    error_logged = threading.Event()
+    states = []
+    config = VshConfig()
+    config.stt.provider = "sarvam"
+    thread = VoiceInputThread(queue.Queue(), config=config, state_callback=states.append)
+    thread.is_listening = True
+
+    with (
+        patch("vsh.providers.resolve_stt", return_value=None) as resolve_stt,
+        patch("vsh.core.voice_input.logger.error", side_effect=lambda _message: error_logged.set()),
+    ):
+        thread.start()
+        assert error_logged.wait(timeout=1)
+        was_listening = thread.is_listening
+        thread.stop()
+        thread.join(timeout=2)
+
+    resolve_stt.assert_called_once_with(config)
+    assert not was_listening
+    assert states[-1] is None
 
 
 def test_concurrent_toggles_publish_callbacks_in_transition_order():

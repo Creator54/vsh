@@ -96,7 +96,7 @@ class VoiceInputThread(threading.Thread):
             config_to_use = self.config if self.config else VshConfig()
             self.stt_provider = resolve_stt(config_to_use)
             if not self.stt_provider:
-                raise ValueError(f"Unknown STT provider: {provider_name}")
+                raise ValueError(f"STT provider unavailable: {provider_name}")
             self.model_loaded = True
             logger.info("STT model loaded.")
 
@@ -139,6 +139,16 @@ class VoiceInputThread(threading.Thread):
 
     def _session_enabled(self, generation: int | None = None) -> bool:
         return self.is_listening and (generation is None or generation == self._listen_generation)
+
+    def _disable_listening(self, generation: int) -> bool:
+        with self._toggle_lock:
+            if generation != self._listen_generation or not self.is_listening:
+                return False
+            self.is_listening = False
+            self._listen_generation += 1
+            if self.state_callback:
+                self.state_callback(None)
+            return True
 
     def _capture_enabled(self, generation: int | None = None) -> bool:
         return self._session_enabled(generation) and self.system_mic_muted is not True
@@ -237,26 +247,24 @@ class VoiceInputThread(threading.Thread):
                 break
 
             try:
-                self.load_model()
-                if not self._session_enabled():
-                    continue
                 with self._toggle_lock:
                     generation = self._listen_generation
+                try:
+                    self.load_model()
+                except Exception as e:
+                    self._disable_listening(generation)
+                    logger.error(f"Voice thread error: {e}")
+                    continue
+                if not self._session_enabled(generation):
+                    continue
 
                 from vsh.core.microphone import acquire_microphone, release_microphone
 
                 lease = acquire_microphone()
                 if lease is None:
-                    disabled = False
-                    with self._toggle_lock:
-                        if generation == self._listen_generation and self.is_listening:
-                            self.is_listening = False
-                            self._listen_generation += 1
-                            disabled = True
+                    disabled = self._disable_listening(generation)
                     if disabled:
                         logger.warning("Microphone is already in use by another VSH session")
-                        if self.state_callback:
-                            self.state_callback(None)
                     continue
 
                 with self._toggle_lock:
