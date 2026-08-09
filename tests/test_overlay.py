@@ -15,13 +15,16 @@ from vsh.core.voice_input import VoiceState
 
 
 class _FakeVoiceThread:
-    def __init__(self, state_callback=None, capture_started_callback=None, capture_stopped_callback=None):
+    def __init__(
+        self, state_callback=None, capture_started_callback=None, capture_stopped_callback=None, error_callback=None
+    ):
         self.is_listening = False
         self.is_processing = False
         self.system_mic_muted = None
         self.state_callback = state_callback
         self.capture_started_callback = capture_started_callback
         self.capture_stopped_callback = capture_stopped_callback
+        self.error_callback = error_callback
 
     def toggle_listening(self):
         self.is_listening = not self.is_listening
@@ -50,6 +53,7 @@ class OverlayTests(unittest.TestCase):
                 kwargs.get("state_callback"),
                 kwargs.get("capture_started_callback"),
                 kwargs.get("capture_stopped_callback"),
+                kwargs.get("error_callback"),
             ),
         ):
             shell = PtyShell(cfg, thinker=None, verbose=False, tts_provider=None)
@@ -61,6 +65,15 @@ class OverlayTests(unittest.TestCase):
 
     def test_default_overlay_mode_is_auto(self):
         self.assertEqual(VshConfig().shell.overlay_mode, "auto")
+
+    def test_voice_initialization_error_uses_terminal_publisher(self):
+        shell = self._make_shell("none")
+
+        with patch("sys.stdout") as stdout:
+            shell.voice_thread.error_callback("Sarvam API key is required")
+
+        stdout.write.assert_called_once_with("\r\nvsh: STT unavailable: Sarvam API key is required\r\n")
+        stdout.flush.assert_called_once_with()
 
     def test_ctrl_close_bracket_is_a_listening_trigger(self):
         shell = self._make_shell("auto")

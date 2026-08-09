@@ -161,6 +161,7 @@ class PtyShell:
             state_callback=self._set_cursor_state,
             capture_started_callback=self._start_mic_monitor,
             capture_stopped_callback=self._stop_mic_monitor,
+            error_callback=lambda error: self._publish_reply(f"vsh: STT unavailable: {error}", ""),
         )
         self.pipeline_thread = None
         self.background_thread = None

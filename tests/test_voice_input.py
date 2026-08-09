@@ -74,26 +74,34 @@ def test_toggle_does_not_load_the_model_on_the_terminal_thread(tmp_path: Path):
 
 
 def test_model_initialization_failure_disables_listening_without_retry():
-    error_logged = threading.Event()
+    error_reported = threading.Event()
+    errors = []
     states = []
     config = VshConfig()
     config.stt.provider = "sarvam"
-    thread = VoiceInputThread(queue.Queue(), config=config, state_callback=states.append)
+
+    def report_error(message):
+        errors.append(message)
+        error_reported.set()
+
+    thread = VoiceInputThread(queue.Queue(), config=config, state_callback=states.append, error_callback=report_error)
     thread.is_listening = True
 
     with (
-        patch("vsh.providers.resolve_stt", return_value=None) as resolve_stt,
-        patch("vsh.core.voice_input.logger.error", side_effect=lambda _message: error_logged.set()),
+        patch("vsh.providers.resolve_stt", side_effect=ValueError("Sarvam API key is required")) as resolve_stt,
+        patch("vsh.core.voice_input.logger.error") as log_error,
     ):
         thread.start()
-        assert error_logged.wait(timeout=1)
+        assert error_reported.wait(timeout=1)
         was_listening = thread.is_listening
         thread.stop()
         thread.join(timeout=2)
 
-    resolve_stt.assert_called_once_with(config)
+    resolve_stt.assert_called_once_with(config, raise_errors=True)
     assert not was_listening
     assert states[-1] is None
+    assert errors == ["Sarvam API key is required"]
+    log_error.assert_not_called()
 
 
 def test_concurrent_toggles_publish_callbacks_in_transition_order():

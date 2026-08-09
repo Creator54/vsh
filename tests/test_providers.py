@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 from vsh.core.config import ProviderConfig, VshConfig
-from vsh.providers import resolve_tts
+from vsh.providers import resolve_stt, resolve_tts
 from vsh.providers.audio_format import decode_pcm16_wav, encode_pcm_wav
 from vsh.providers.http_audio import HttpSTTProvider, HttpTTSProvider
 from vsh.providers.polly import AwsPollyTTSProvider
@@ -44,6 +44,16 @@ def _wait_for_vosk_model(model_path: str, results):
 
 
 class TestProviders(unittest.TestCase):
+    @patch("vsh.providers.logger.error")
+    def test_resolve_stt_can_surface_initialization_error(self, log_error):
+        config = VshConfig()
+        config.stt.provider = "sarvam"
+
+        with self.assertRaisesRegex(ValueError, "Sarvam API key is required"):
+            resolve_stt(config, raise_errors=True)
+
+        log_error.assert_not_called()
+
     def test_none_disables_tts(self):
         config = VshConfig()
         config.tts.provider = "none"

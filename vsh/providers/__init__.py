@@ -2,9 +2,11 @@ from vsh.core.config import VshConfig
 from vsh.core.logger import logger
 
 
-def resolve_stt(config: VshConfig):
+def resolve_stt(config: VshConfig, *, raise_errors: bool = False):
     provider = config.stt.provider
     if not provider:
+        if raise_errors:
+            raise ValueError("STT provider is not configured")
         return None
     try:
         if provider == "custom_http":
@@ -23,8 +25,12 @@ def resolve_stt(config: VshConfig):
             from vsh.providers.sarvam import SarvamSTTProvider
 
             return SarvamSTTProvider(config.stt)
+        if raise_errors:
+            raise ValueError(f"Unknown STT provider: {provider}")
         return None
     except Exception as e:
+        if raise_errors:
+            raise
         logger.error(f"Failed to initialize STT provider '{config.stt.provider}': {e}")
         return None
 

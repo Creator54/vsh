@@ -46,6 +46,7 @@ class VoiceInputThread(threading.Thread):
         state_callback=None,
         capture_started_callback=None,
         capture_stopped_callback=None,
+        error_callback=None,
     ):
         super().__init__(name="VoiceInputThread", daemon=True)
         self.stt_queue = stt_queue
@@ -58,6 +59,7 @@ class VoiceInputThread(threading.Thread):
         self.state_callback = state_callback
         self.capture_started_callback = capture_started_callback
         self.capture_stopped_callback = capture_stopped_callback
+        self.error_callback = error_callback
 
         self.is_listening = False
         self.should_exit = False
@@ -94,7 +96,7 @@ class VoiceInputThread(threading.Thread):
             from vsh.providers import resolve_stt
 
             config_to_use = self.config if self.config else VshConfig()
-            self.stt_provider = resolve_stt(config_to_use)
+            self.stt_provider = resolve_stt(config_to_use, raise_errors=True)
             if not self.stt_provider:
                 raise ValueError(f"STT provider unavailable: {provider_name}")
             self.model_loaded = True
@@ -253,7 +255,10 @@ class VoiceInputThread(threading.Thread):
                     self.load_model()
                 except Exception as e:
                     self._disable_listening(generation)
-                    logger.error(f"Voice thread error: {e}")
+                    if self.error_callback:
+                        self.error_callback(str(e))
+                    else:
+                        logger.error(f"Voice thread error: {e}")
                     continue
                 if not self._session_enabled(generation):
                     continue
