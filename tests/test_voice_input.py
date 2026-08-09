@@ -143,6 +143,17 @@ def test_microphone_lease_is_exclusive_and_released(tmp_path: Path):
         assert result.get(timeout=1) is True
 
 
+def test_empty_xdg_runtime_dir_uses_cache_default(tmp_path: Path):
+    with patch.dict(os.environ, {"XDG_RUNTIME_DIR": ""}), patch("pathlib.Path.home", return_value=tmp_path):
+        lease = acquire_microphone()
+
+    try:
+        assert lease is not None
+        assert Path(lease.name) == tmp_path / ".cache/vsh/microphone.lock"
+    finally:
+        release_microphone(lease)
+
+
 def test_microphone_lease_is_held_until_stream_close_finishes(tmp_path: Path):
     entered = threading.Event()
     closing = threading.Event()

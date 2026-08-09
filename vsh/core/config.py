@@ -62,7 +62,7 @@ class VshConfig:
 
 
 def _get_config_path() -> Path:
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "vsh" / "config.toml"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "vsh" / "config.toml"
 
 
 def interactive_setup(section: str | None = None, *, skip_if_configured: bool = False) -> None:

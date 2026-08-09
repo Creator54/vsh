@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from vsh.core.config import load_config
+from vsh.core.config import _get_config_path, load_config
 
 
 def test_load_config_preserves_sections_profiles_and_environment_precedence(tmp_path: Path):
@@ -87,3 +87,8 @@ def test_load_config_skips_interactive_setup_without_tty(tmp_path: Path):
 
     assert config.stt.provider == "vosk"
     interactive_setup.assert_not_called()
+
+
+def test_empty_xdg_config_home_uses_home_default(tmp_path: Path):
+    with patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}), patch("pathlib.Path.home", return_value=tmp_path):
+        assert _get_config_path() == tmp_path / ".config/vsh/config.toml"
