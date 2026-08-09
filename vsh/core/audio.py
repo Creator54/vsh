@@ -244,33 +244,41 @@ class MicStream:
         self._suspended = threading.Event()
 
     def __enter__(self):
-        with no_stderr():
-            try:
-                self._stream = self._audio.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=self.rate,
-                    input=True,
-                    input_device_index=self.device_index,
-                    frames_per_buffer=self.chunk,
-                    stream_callback=self._callback,
-                )
-            except Exception as e:
-                if self.device_index is not None:
-                    logger.warning(
-                        f"Failed to open audio device index {self.device_index}: {e}. Falling back to default device."
-                    )
+        try:
+            with no_stderr():
+                try:
                     self._stream = self._audio.open(
                         format=pyaudio.paInt16,
                         channels=1,
                         rate=self.rate,
                         input=True,
-                        input_device_index=None,
+                        input_device_index=self.device_index,
                         frames_per_buffer=self.chunk,
                         stream_callback=self._callback,
                     )
-                else:
-                    raise
+                except Exception as e:
+                    if self.device_index is not None:
+                        logger.warning(
+                            f"Failed to open audio device index {self.device_index}: {e}. Falling back to default device."
+                        )
+                        self._stream = self._audio.open(
+                            format=pyaudio.paInt16,
+                            channels=1,
+                            rate=self.rate,
+                            input=True,
+                            input_device_index=None,
+                            frames_per_buffer=self.chunk,
+                            stream_callback=self._callback,
+                        )
+                    else:
+                        raise
+        except Exception:
+            try:
+                self._audio.terminate()
+            except Exception:
+                pass
+            self._audio = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

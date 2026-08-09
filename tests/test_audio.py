@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from vsh.core.audio import MicStream, detect_phrase, no_stderr, save_audio, synthesize_pcm16
 
@@ -327,3 +328,18 @@ def test_mic_stream_falls_back_to_default_device_on_open_failure():
     assert stream._audio.open.call_count == 2
     assert stream._audio.open.call_args_list[0].kwargs["input_device_index"] == 99
     assert stream._audio.open.call_args_list[1].kwargs["input_device_index"] is None
+
+
+def test_mic_stream_releases_audio_when_fallback_open_fails():
+    from unittest.mock import MagicMock
+
+    stream = MicStream.__new__(MicStream)
+    stream.rate, stream.chunk, stream.device_index = 16000, 1024, 99
+    audio = MagicMock()
+    audio.open.side_effect = OSError("device unavailable")
+    stream._audio = audio
+
+    with pytest.raises(OSError, match="device unavailable"):
+        stream.__enter__()
+
+    audio.terminate.assert_called_once_with()
