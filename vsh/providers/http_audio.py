@@ -57,14 +57,23 @@ class HttpSTTProvider:
             response.raise_for_status()
             resp_json = response.json()
 
-            res = resp_json.get("text") or resp_json.get("transcript")
-            if not res:
+            if not isinstance(resp_json, dict) or ("text" not in resp_json and "transcript" not in resp_json):
                 logger.warning(f"Unexpected STT response format: {resp_json}")
-                res = str(resp_json)
+                return ""
+            res = resp_json.get("text")
+            if res is None or res == "":
+                res = resp_json.get("transcript")
+            if res is None or res == "":
+                return ""
+            if not isinstance(res, str):
+                logger.warning(f"Unexpected STT response format: {resp_json}")
+                return ""
+            if not res.strip():
+                return ""
 
-            if res and on_phrase:
+            if on_phrase:
                 on_phrase(res)
-            return str(res or "")
+            return res
 
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP STT request failed: {e}")

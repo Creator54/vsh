@@ -18,7 +18,7 @@ from vsh.providers import resolve_tts
 from vsh.providers.audio_format import decode_pcm16_wav, encode_pcm_wav
 from vsh.providers.http_audio import HttpSTTProvider, HttpTTSProvider
 from vsh.providers.polly import AwsPollyTTSProvider
-from vsh.providers.sarvam import SarvamTTSProvider
+from vsh.providers.sarvam import SarvamSTTProvider, SarvamTTSProvider
 from vsh.providers.supertonic import SupertonicTTSProvider
 
 
@@ -204,6 +204,48 @@ class TestProviders(unittest.TestCase):
         wav = post.call_args.kwargs["files"]["file"][1]
         np.testing.assert_array_equal(decode_pcm16_wav(wav), np.frombuffer(pcm, dtype=np.int16) / 32768.0)
         self.assertEqual(post.call_args.kwargs["timeout"], 15)
+
+    @patch("requests.post")
+    def test_http_stt_rejects_non_transcript_json(self, post):
+        provider = HttpSTTProvider(ProviderConfig(endpoint="https://speech.example"))
+        callback = MagicMock()
+
+        for payload in ([], {"error": "failed"}, {"text": 123}):
+            post.return_value.json.return_value = payload
+            self.assertEqual(provider.transcribe_stream([b"\0\0"], on_phrase=callback), "")
+
+        callback.assert_not_called()
+
+    @patch("requests.post")
+    def test_http_stt_accepts_empty_transcript_as_silence(self, post):
+        post.return_value.json.return_value = {"text": ""}
+        provider = HttpSTTProvider(ProviderConfig(endpoint="https://speech.example"))
+
+        with patch("vsh.providers.http_audio.logger.warning") as warning:
+            self.assertEqual(provider.transcribe_stream([b"\0\0"]), "")
+
+        warning.assert_not_called()
+
+    @patch("requests.post")
+    def test_sarvam_stt_rejects_non_string_transcript(self, post):
+        post.return_value.json.return_value = {"transcript": 123}
+        callback = MagicMock()
+        provider = SarvamSTTProvider(ProviderConfig(api_key="secret"))
+
+        result = provider.transcribe_stream([b"\0\0"], on_phrase=callback)
+
+        self.assertEqual(result, "")
+        callback.assert_not_called()
+
+    @patch("requests.post")
+    def test_sarvam_stt_accepts_empty_transcript_as_silence(self, post):
+        post.return_value.json.return_value = {"transcript": ""}
+        provider = SarvamSTTProvider(ProviderConfig(api_key="secret"))
+
+        with patch("vsh.providers.sarvam.logger.warning") as warning:
+            self.assertEqual(provider.transcribe_stream([b"\0\0"]), "")
+
+        warning.assert_not_called()
 
     @patch("requests.post")
     def test_http_tts_decodes_wav_samples(self, post):

@@ -30,10 +30,22 @@ class SarvamSTTProvider:
             response.raise_for_status()
             resp_json = response.json()
 
-            text = resp_json.get("transcript") or resp_json.get("text", "")
-            if text and on_phrase:
+            if not isinstance(resp_json, dict) or ("transcript" not in resp_json and "text" not in resp_json):
+                logger.warning(f"Unexpected Sarvam STT response format: {resp_json}")
+                return ""
+            text = resp_json.get("transcript")
+            if text is None or text == "":
+                text = resp_json.get("text")
+            if text is None or text == "":
+                return ""
+            if not isinstance(text, str):
+                logger.warning(f"Unexpected Sarvam STT response format: {resp_json}")
+                return ""
+            if not text.strip():
+                return ""
+            if on_phrase:
                 on_phrase(text)
-            return str(text or "")
+            return text
 
         except Exception as e:
             logger.error(f"Sarvam STT failed: {e}")
