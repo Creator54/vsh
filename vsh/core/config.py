@@ -1,4 +1,5 @@
 import os
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -88,7 +89,12 @@ def load_config() -> VshConfig:
                         elif hasattr(cfg.llm, sub_key):
                             setattr(cfg.llm, sub_key, sub_value)
                 elif hasattr(cfg, key):
-                    vars(getattr(cfg, key)).update(value)
+                    sub_dict = value
+                    target = getattr(cfg, key)
+                    if isinstance(sub_dict, dict):
+                        for sub_k, sub_v in sub_dict.items():
+                            if hasattr(target, sub_k):
+                                setattr(target, sub_k, sub_v)
         except Exception as error:
             logger.error(f"Failed to load {config_path}: {error}")
 
@@ -130,7 +136,7 @@ def load_config() -> VshConfig:
     if "VSH_RESPONSE_BRIDGE" in os.environ:
         cfg.shell.response_bridge = os.environ["VSH_RESPONSE_BRIDGE"]
 
-    if not config_path.exists():
+    if not config_path.exists() and sys.stdin.isatty():
         interactive_setup(skip_if_configured=True)
         return load_config()
 

@@ -63,3 +63,27 @@ api_key_env = "LLM_TEST_KEY"
         "api_key_env": "LLM_TEST_KEY",
         "api_key": "llm-secret",
     }
+
+
+def test_load_config_ignores_unknown_section_keys(tmp_path: Path):
+    config_dir = tmp_path / "vsh"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('[shell]\ninner_shell = "/bin/fish"\nunknown = "ignored"\n')
+
+    with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}, clear=True):
+        config = load_config()
+
+    assert config.shell.inner_shell == "/bin/fish"
+    assert not hasattr(config.shell, "unknown")
+
+
+def test_load_config_skips_interactive_setup_without_tty(tmp_path: Path):
+    with (
+        patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp_path)}, clear=True),
+        patch("vsh.core.config.sys.stdin.isatty", return_value=False),
+        patch("vsh.core.config.interactive_setup") as interactive_setup,
+    ):
+        config = load_config()
+
+    assert config.stt.provider == "vosk"
+    interactive_setup.assert_not_called()
