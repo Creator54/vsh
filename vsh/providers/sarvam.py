@@ -33,7 +33,8 @@ class SarvamSTTProvider:
             text = resp_json.get("transcript") or resp_json.get("text", "")
             if text and on_phrase:
                 on_phrase(text)
-            return text
+            return str(text or "")
+
         except Exception as e:
             logger.error(f"Sarvam STT failed: {e}")
             if hasattr(e, "response") and e.response is not None:

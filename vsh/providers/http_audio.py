@@ -64,7 +64,8 @@ class HttpSTTProvider:
 
             if res and on_phrase:
                 on_phrase(res)
-            return res
+            return str(res or "")
+
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP STT request failed: {e}")
             if hasattr(e, "response") and e.response is not None:

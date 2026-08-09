@@ -16,6 +16,13 @@ repos:
       - id: ruff-format
   - repo: local
     hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy vsh tests
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
       - id: pytest
         name: pytest
         entry: uv run pytest

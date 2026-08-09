@@ -114,7 +114,7 @@ class HttpThinker:
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                text = self._extract(data, self.format_spec["response_path"])
+                text = self._extract(data, str(self.format_spec["response_path"]))
                 if text is None:
                     return "echo 'Empty response from API'\n"
                 return str(text).strip()

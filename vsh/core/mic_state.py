@@ -39,7 +39,8 @@ class PipeWireState:
     def mic_muted(self) -> bool | None:
         for source in self._sources.values():
             if source.get("name") == self._default_source:
-                return source.get("muted")
+                val = source.get("muted")
+                return val if isinstance(val, bool) else None
         return None
 
     def update(self, objects) -> bool | None:
@@ -92,8 +93,10 @@ class PipeWireState:
         if not isinstance(props, list):
             return None
         for prop in props:
-            if isinstance(prop, dict) and isinstance(prop.get("mute"), bool):
-                return prop["mute"]
+            if isinstance(prop, dict):
+                val = prop.get("mute")
+                if isinstance(val, bool):
+                    return val
         return None
 
 

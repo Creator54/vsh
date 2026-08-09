@@ -227,10 +227,11 @@ def _get_typer_app():
     ):
         """Read text aloud."""
         config = load_config()
-        text = text or (not sys.stdin.isatty() and sys.stdin.read().strip())
-        if not text:
+        input_text: str | None = text or (sys.stdin.read().strip() if not sys.stdin.isatty() else None)
+        if not input_text:
             logger.error("No input")
             raise typer.Exit(code=1)
+        text = input_text
 
         from vsh.core.audio import no_stderr
 

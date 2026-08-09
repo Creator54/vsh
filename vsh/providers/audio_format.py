@@ -46,4 +46,5 @@ def resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarra
     target_length = int(duration * target_rate)
     source = np.linspace(0, duration, len(audio))
     target = np.linspace(0, duration, target_length)
-    return np.interp(target, source, audio).astype(np.float32)
+    res: np.ndarray = np.interp(target, source, audio).astype(np.float32)
+    return res

@@ -46,4 +46,5 @@ class SupertonicTTSProvider:
             wav, _ = self.engine.synthesize(
                 text=text, voice_style=self.voice_style, total_steps=8, speed=1.0, lang="en"
             )
-        return wav.flatten()
+        res: np.ndarray = wav.flatten()
+        return res

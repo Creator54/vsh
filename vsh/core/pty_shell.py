@@ -146,7 +146,7 @@ class PtyShell:
         self.inner_shell_args = config.shell.inner_shell_args or [self.inner_shell]
 
         self.master_fd = None
-        self.stt_queue = queue.Queue()
+        self.stt_queue: queue.Queue[str | None] = queue.Queue()
         self._terminal_lock = threading.RLock()
         self._mic_monitor_lock = threading.Lock()
         self.mic_monitor = None
@@ -176,14 +176,14 @@ class PtyShell:
         self._prompt_input_revision = 0
         self._prompt_control_tail = b""
         self.indicator = VoiceIndicator(config.shell.overlay_mode, config.stt.vad_threshold, self._terminal_lock)
-        self._current_cursor_state = None
-        self._system_mic_muted = None
+        self._current_cursor_state: VoiceState | None = None
+        self._system_mic_muted: bool | None = None
 
         self.shell_name = os.path.basename(self.inner_shell)
         self.shell_pid = None
         self.shell_state = "starting"
         self._history_lock = threading.Lock()
-        self.output_history = collections.deque(maxlen=2000)
+        self.output_history: collections.deque[bytes] = collections.deque(maxlen=2000)
 
     def _pipeline_worker(self):
         """Process voice input without blocking the shell."""

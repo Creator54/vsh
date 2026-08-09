@@ -177,8 +177,8 @@ def _atomic_write_texts(updates: list[tuple[Path, str, int]]) -> None:
 
         replaced = []
         try:
-            for pending, path in staged:
-                os.replace(pending, path)
+            for staged_pending, path in staged:
+                os.replace(staged_pending, path)
                 replaced.append(path)
         except BaseException:
             for path, existed, content, default_mode in reversed(snapshots):
@@ -197,8 +197,8 @@ def _atomic_write_texts(updates: list[tuple[Path, str, int]]) -> None:
             finally:
                 os.close(directory_fd)
     finally:
-        for pending, _ in staged:
-            pending.unlink(missing_ok=True)
+        for staged_pending, _ in staged:
+            staged_pending.unlink(missing_ok=True)
 
 
 def _render_shell_rc_bind(target: Path, rc_file: str, keybind_data: dict | None, set_default: bool) -> str | None:

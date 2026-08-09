@@ -61,12 +61,13 @@ def detect_phrase(
     frequencies = np.fft.rfftfreq(frame_samples, 1 / rate)
     audible_band = (frequencies >= 80) & (frequencies <= 4000)
     voice_band = (frequencies >= 300) & (frequencies <= 3400)
-    pre_roll = deque(maxlen=max(1, pre_roll_ms // frame_ms))
-    trigger_window = deque(maxlen=8)
-    voice_band_window = deque(maxlen=_VOICE_BAND_SMOOTH_FRAMES)
+    pre_roll: deque[tuple[bytes, bool]] = deque(maxlen=max(1, pre_roll_ms // frame_ms))
+    trigger_window: deque[bool] = deque(maxlen=8)
+    voice_band_window: deque[float] = deque(maxlen=_VOICE_BAND_SMOOTH_FRAMES)
     if noise_energies is None:
         noise_energies = deque(maxlen=50)
-    captured = []
+    captured: list[bytes] = []
+
     carry = b""
     triggered = False
     activity_announced = False

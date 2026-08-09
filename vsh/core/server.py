@@ -72,11 +72,15 @@ def make_handler(shell, token: str):
     return Handler
 
 
+class VshHTTPServer(ThreadingHTTPServer):
+    auth_token: str
+
+
 def serve(shell, host="127.0.0.1", port=8770, max_attempts=10, token: str | None = None):
     token = token or os.environ.get("VSH_SERVER_TOKEN") or secrets.token_urlsafe(32)
     for current_port in range(port, port + max_attempts):
         try:
-            srv = ThreadingHTTPServer((host, current_port), make_handler(shell, token))
+            srv = VshHTTPServer((host, current_port), make_handler(shell, token))
             srv.auth_token = token
             t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
             t.start()

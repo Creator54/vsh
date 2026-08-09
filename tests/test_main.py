@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -61,6 +62,31 @@ def test_unknown_command_returns_usage_error():
     result = CliRunner().invoke(main_module.app, ["definitely-not-a-command"])
 
     assert result.exit_code == 2
+
+
+def test_tts_loads_config_before_resolving_provider(monkeypatch):
+    from vsh.core import audio
+
+    config = VshConfig()
+    config.tts.device_index = 3
+    provider = object()
+    load_config = MagicMock(return_value=config)
+    resolve_tts = MagicMock(return_value=provider)
+    play_audio = MagicMock()
+
+    monkeypatch.setattr(main_module, "_is_vsh_active_on_this_terminal", lambda: False)
+    monkeypatch.setattr(main_module, "load_config", load_config)
+    monkeypatch.setattr(main_module, "resolve_tts", resolve_tts)
+    monkeypatch.setattr(audio, "no_stderr", nullcontext)
+    monkeypatch.setattr(audio, "synthesize_pcm16", lambda _provider, _text: (b"audio", 16000))
+    monkeypatch.setattr(audio, "play_audio", play_audio)
+
+    result = CliRunner().invoke(main_module.app, ["tts", "hello"])
+
+    assert result.exit_code == 0, result.output
+    load_config.assert_called_once_with()
+    resolve_tts.assert_called_once_with(config)
+    play_audio.assert_called_once_with(b"audio", 16000, device_index=3)
 
 
 def test_active_vsh_guard_is_scoped_to_the_current_terminal(monkeypatch):

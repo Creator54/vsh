@@ -63,14 +63,13 @@ def make_thread(provider, states):
 
 
 def test_toggle_does_not_load_the_model_on_the_terminal_thread(tmp_path: Path):
-    states = []
+    states: list[VoiceState | None] = []
     thread = VoiceInputThread(queue.Queue(), state_callback=states.append)
-    thread.load_model = lambda: (_ for _ in ()).throw(AssertionError("loaded synchronously"))
-
-    with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(tmp_path)}):
-        assert thread.toggle_listening()
-        assert states == [VoiceState.IDLE]
-        thread.stop()
+    with patch.object(thread, "load_model", side_effect=AssertionError("loaded synchronously")):
+        with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(tmp_path)}):
+            assert thread.toggle_listening()
+            assert states == [VoiceState.IDLE]
+            thread.stop()
 
 
 def test_concurrent_toggles_publish_callbacks_in_transition_order():
@@ -170,14 +169,18 @@ def test_microphone_lease_is_held_until_stream_close_finishes(tmp_path: Path):
     thread = VoiceInputThread(queue.Queue())
     thread.is_listening = True
     thread.is_processing = True
-    thread.load_model = lambda: None
 
-    with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(tmp_path)}), patch("vsh.core.audio.MicStream", ClosingStream):
+    with (
+        patch.object(thread, "load_model", return_value=None),
+        patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(tmp_path)}),
+        patch("vsh.core.audio.MicStream", ClosingStream),
+    ):
         thread.start()
         assert entered.wait(timeout=1)
         assert not thread.toggle_listening()
         assert closing.wait(timeout=1)
         assert acquire_microphone() is None
+
         finish_close.set()
         thread.stop()
         thread.join(timeout=2)

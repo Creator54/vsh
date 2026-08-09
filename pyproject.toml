@@ -40,9 +40,28 @@ convention = "google"
 
 [dependency-groups]
 dev = [
+    "mypy>=1.15.0",
     "pre-commit>=4.6.0",
     "pytest>=9.1.0",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = [
+    "vosk.*",
+    "webrtcvad.*",
+    "pyaudio.*",
+    "boto3.*",
+    "google.cloud.*",
+    "supertonic.*",
+    "InquirerPy.*",
+]
+ignore_missing_imports = true

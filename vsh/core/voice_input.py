@@ -64,7 +64,7 @@ class VoiceInputThread(threading.Thread):
         self.model_loaded = False
         self.stt_provider = None
         self.is_processing = False
-        self.system_mic_muted = None
+        self.system_mic_muted: bool | None = None
 
         self._toggle_event = threading.Event()
         self._toggle_lock = threading.Lock()

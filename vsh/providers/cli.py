@@ -13,7 +13,7 @@ class CliThinker:
         self.timeout = timeout
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
-        self._process = None
+        self._process: subprocess.Popen[str] | None = None
 
     @staticmethod
     def _kill(process: subprocess.Popen) -> None:
