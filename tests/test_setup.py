@@ -239,7 +239,7 @@ def test_fish_shell_update_replaces_one_managed_block(tmp_path: Path):
     assert content.startswith("set -gx EDITOR nvim\n")
     assert content.count("# --- vsh configuration start ---") == 1
     assert "bind \\c] 'vsh --voice; commandline -f repaint'" in content
-    assert 'test "$VSH_ACTIVE_TTY" != (tty)' in content
+    assert 'if status is-interactive; and isatty 1; and begin;' in content
 
 
 def test_shell_update_prepends_managed_block_when_setting_default(tmp_path: Path):
@@ -251,7 +251,7 @@ def test_shell_update_prepends_managed_block_when_setting_default(tmp_path: Path
 
     content = config.read_text()
     assert content.startswith("# --- vsh configuration start ---")
-    assert 'test "$VSH_ACTIVE_TTY" != (tty)' in content
+    assert 'if status is-interactive; and isatty 1; and begin;' in content
     assert "set -gx EDITOR nvim\n" in content
 
 

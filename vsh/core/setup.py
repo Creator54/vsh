@@ -227,7 +227,7 @@ def _render_shell_rc_bind(target: Path, rc_file: str, keybind_data: dict | None,
     if set_default:
         if is_fish:
             append_cmd += (
-                'if isatty 1; and begin; not set -q VSH_ACTIVE_TTY; or test "$VSH_ACTIVE_TTY" != (tty); end\n'
+                'if status is-interactive; and isatty 1; and begin; not set -q VSH_ACTIVE_TTY; or test "$VSH_ACTIVE_TTY" != (tty); end\n'
                 "    exec vsh\n"
                 "end\n"
             )
