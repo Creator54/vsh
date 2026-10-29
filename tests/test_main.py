@@ -13,7 +13,7 @@ from vsh.core.config import VshConfig
 from vsh.core.pty_shell import PtyShell
 
 
-def _run_main(monkeypatch, *, serve=False, port=8770):
+def _run_main(monkeypatch, *, serve=False, instance_id=None):
     config = VshConfig()
     config.tts.provider = ""
     shell = MagicMock()
@@ -34,7 +34,7 @@ def _run_main(monkeypatch, *, serve=False, port=8770):
         echo=False,
         no_overlay=False,
         serve=serve,
-        port=port,
+        instance_id=instance_id,
     )
     shell.resolve_tts = resolve_tts
     shell.constructor = constructor
@@ -42,9 +42,10 @@ def _run_main(monkeypatch, *, serve=False, port=8770):
 
 
 def test_serve_is_deferred_to_the_pty_parent(monkeypatch):
-    shell = _run_main(monkeypatch, serve=True, port=4567)
+    shell = _run_main(monkeypatch, serve=True, instance_id="test-shell")
 
-    assert shell.constructor.call_args.kwargs["server_port"] == 4567
+    assert shell.constructor.call_args.kwargs["serve"] is True
+    assert shell.constructor.call_args.kwargs["instance_id"] == "test-shell"
     shell.run.assert_called_once_with()
     shell.resolve_tts.assert_not_called()
 
@@ -52,7 +53,7 @@ def test_serve_is_deferred_to_the_pty_parent(monkeypatch):
 def test_server_is_disabled_by_default(monkeypatch):
     shell = _run_main(monkeypatch)
 
-    assert shell.constructor.call_args.kwargs["server_port"] is None
+    assert shell.constructor.call_args.kwargs["serve"] is False
     shell.run.assert_called_once_with()
 
 

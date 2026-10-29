@@ -61,7 +61,7 @@ nix profile install github:creator54/vsh
   - `--voice`: start listening immediately.
   - `--verbose`: show logs.
   - `--echo`: return recognized speech without an AI.
-  - `--serve --port 8770`: expose authenticated, read-only shell status and output on a local-only web server.
+  - `--serve [--instance-id NAME]`: expose read-only shell status and output over a private Unix socket; prints the socket path. IDs default to random and accept 1–32 ASCII letters, digits, underscores or hyphens.
 - `vsh setup`: configure the shell, speech and AI providers, microphone, and keybind.
 - `vsh bind`: change the VSH toggle keybind.
 - `vsh stt [--file <audio.wav>]`: transcribe the microphone or a WAV file.
@@ -86,9 +86,10 @@ nix profile install github:creator54/vsh
 - Output: `VSH_OUTPUT_MODE` (`speak_and_command`, `command_only`, or `speak_only`).
 - Visual: `VSH_OVERLAY` (`auto`, `kitty`, or `none`).
 - Voice command: `VSH_VOICE_HANDLER='command {}'`.
-- HTTP bridge: `VSH_SERVER_TOKEN` sets the bearer token for `--serve`.
-  - When unset, VSH generates and prints a per-instance token with the bound address.
-  - Send it as `Authorization: Bearer <token>` on every bridge request.
+- Local bridge: HTTP over `$XDG_RUNTIME_DIR/vsh/<instance-id>.sock`, or `${TMPDIR:-/tmp}/vsh-<uid>/<instance-id>.sock` when `XDG_RUNTIME_DIR` is unset. The directory is 0700 and the socket is 0600; access is restricted to the same OS user (and privileged processes), without bearer tokens or a TCP listener. Unsafe existing directories are rejected, not repaired.
+  - Read-only endpoints: `GET /health`, `GET /tools` (empty), `GET /io/output`. `/health` retains the existing shell state field; it is not a reliable command-readiness signal. `POST /execute_tool` remains disabled (410).
+  - Example: `curl --unix-socket "$XDG_RUNTIME_DIR/vsh/demo.sock" http://localhost/health` after starting `vsh --serve --instance-id demo`.
+  - Replaces `--port` and `VSH_SERVER_TOKEN`. Consumers must connect through the socket; do not forward it over TCP. Live paths and unrelated files are never overwritten; refused connections on owned stale sockets allow reclamation.
 
 ## Keybinds
 

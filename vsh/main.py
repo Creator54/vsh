@@ -124,8 +124,10 @@ def _get_typer_app():
         no_overlay: bool = typer.Option(
             False, "--no-overlay", help="Hide the voice indicator and use the normal terminal cursor."
         ),
-        serve: bool = typer.Option(False, "--serve", help="Expose read-only shell status on a local-only web server."),
-        port: int = typer.Option(8770, "--port", help="Port for --serve (default 8770)."),
+        serve: bool = typer.Option(False, "--serve", help="Expose read-only shell status over a private Unix socket."),
+        instance_id: str | None = typer.Option(
+            None, "--instance-id", help="Socket instance ID for --serve (default: random)."
+        ),
     ):
         """Start an interactive terminal controlled by voice."""
         setup_logger(v)
@@ -164,7 +166,8 @@ def _get_typer_app():
             thinker,
             verbose=VERBOSE,
             voice_handler=voice_handler,
-            server_port=port if serve else None,
+            serve=serve,
+            instance_id=instance_id,
         )
 
         try:

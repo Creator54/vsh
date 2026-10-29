@@ -97,14 +97,16 @@ class PtyShell:
         verbose: bool = False,
         tts_provider=None,
         voice_handler=None,
-        server_port: int | None = None,
+        serve: bool = False,
+        instance_id: str | None = None,
     ):
         self.config = config
         self.thinker = thinker
         self.verbose = verbose
         self.tts_provider = tts_provider
         self.voice_handler = voice_handler
-        self.server_port = server_port
+        self.serve = serve
+        self.instance_id = instance_id
         self.http_server = None
 
         if self.config.shell.response_bridge:
@@ -612,17 +614,13 @@ class PtyShell:
             pass
 
     def _start_http_server(self):
-        if self.server_port is None or self._exiting:
+        if not self.serve or self._exiting:
             return
         try:
             from vsh.core.server import serve
 
-            self.http_server = serve(self, port=self.server_port)
-            if self.http_server is not None:
-                host, port = self.http_server.server_address
-                logger.success(
-                    f"HTTP bridge · http://{host}:{port} · Authorization: Bearer {self.http_server.auth_token}"
-                )
+            self.http_server = serve(self, instance_id=self.instance_id)
+            logger.success(f"Read-only shell socket · {self.http_server.server_address}")
         except Exception as error:
             logger.error(f"Shell bridge failed: {error}")
 
